@@ -8,7 +8,7 @@ Summaries of foundation models (FMs) across modalities.
 | Name      | Paper | GitHub | Hugging Face | Note |
 |-----------|-------|--------|:------------:|------|
 | Foresight | [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S2589750024000256?pes=vor&utm_source=chemport&getft_integrator=chemport) | [CogStack/Foresight](https://github.com/CogStack/Foresight/tree/main) | — | EHR-focused FM; concept extraction & phenotyping. |
-
+| CoMet | [CoMet](https://arxiv.org/pdf/2508.12104) | - | — | Using Epic Cosmos, a dataset with medical events from de-identified longitudinal health records for 16.3 billion encounters over 300 million unique patient records from 310 health systems, we introduce the Curiosity models, a family of decoder-only transformer models pretrained on 118 million patients representing 115 billion discrete medical events (151 billions) |
 
 
 
@@ -26,6 +26,24 @@ Summaries of foundation models (FMs) across modalities.
 | USFM | [USFM: A universal ultrasound foundation model generalized to tasks and organs towards label efficient image analysis](https://www.sciencedirect.com/science/article/pii/S1361841524001270) | [openmedlab/USFM](https://github.com/openmedlab/USFM) | [Drive](https://drive.google.com/file/d/1KRwXZgYterH895Z8EpXpR1L1eSMMJo4q/view?usp=sharing) | A large-scale Multi-organ, Multi-center, and Multi-device US database was built, comprehensively containing over two million US images |
 | UNI | [Towards a general-purpose foundation model for computational pathology](https://www.nature.com/articles/s41591-024-02857-3) | [mahmoodlab/UNI](https://github.com/mahmoodlab/UNI) | [HF](https://huggingface.co/MahmoodLab/uni) | ViT-l/16, UNI2-h: ViT-h/14-reg8 | 
 | Virchow2 | [VIRCHOW2: SCALING SELF-SUPERVISED MIXEDMAGNIFICATION MODELS IN PATHOLOGY](https://arxiv.org/pdf/2408.00738) | [HF](https://huggingface.co/paige-ai/Virchow2) | - | Virchow2, a 632 million parameter vision transformer, Virchow2G, a 1.9 billion parameter vision transformer, and Virchow2G Mini, a 22 million parameter distillation of Virchow2G, each trained with 3.1 million histopathology whole slide images, with diverse tissues, originating institutions, and stains | 
+| COBRA      | — | — | — | Pathology encoder on **3,048 WSIs** (6 tissues); image-only, multi-tissue, multiscanner; evaluated on **15 WSI-level classification** tasks. |
+| Phikon-v2  | — | — | — | ViT-style pathology FM with **58,359 WSIs** (30 tissues); image-only, multiresolution (limited), multiscanner; **8 tasks** (classification, segmentation; WSI & cell). |
+| TissueConcepts | — | — | — | Encoder on **7,042 WSIs** (14 tissues); image-only, multiscanner; **16 tasks** including classification, segmentation and detection at WSI/cell level. |
+| HIBOU      | — | — | — | Large FM with **1,141,581 WSIs** (12 tissues); image-only, multiresolution (limited), multiscanner; **12 tasks** (classification, segmentation at WSI & cell). |
+| OmniScreen | — | — | — | Screening FM with **30,511 WSIs** (27 tissues); image-only, multiscanner; **70 tasks**, mainly WSI-level classification. |
+| H-Optimus-0 | — | — | — | Encoder on **500,000 WSIs** (32 tissues); image-only, multi-tissue, multiscanner; **11 tasks** (classification, segmentation; WSI & cell). |
+| Kaiko-ai   | — | — | — | Pathology FM with **29,000 WSIs** (32 tissues); image-only, multiscanner; **8 tasks** (WSI & cell-level classification/segmentation). |
+| BROW       | — | — | — | Trained on **11,206 WSIs** (6 tissues); image-only, multiscanner; **11 tasks** at WSI and cell level. |
+| Phikon     | — | — | — | Earlier Phikon encoder with **6,093 WSIs** (16 tissues); image-only, multiscanner; **17 tasks** (classification, segmentation). |
+| Lunit      | — | — | — | Proprietary pathology FM on **36,666 WSIs** (32 tissues); image-only; **8 tasks** (WSI & cell-level classification). |
+| HIPT       | — | — | — | Hierarchical Image Pyramid Transformer with **10,678 WSIs** (33 tissues); image-only; **9 tasks**, mainly WSI-level classification. |
+| CTransPath | — | — | — | Conv–Transformer hybrid on **32,320 WSIs** (32 tissues); image-only, multiscanner; **11 tasks** (classification, segmentation & detection). |
+| HistGen_v  | — | — | — | Visual pretraining variant of a generative histology model with **55,000 WSIs** (60 tissues); image-only; **10 WSI-level** tasks. |
+| REMEDIS    | — | — | — | Encoder on **29,018 WSIs** (32 tissues); image-only; **15 WSI-level** classification tasks. |
+| Madeleine  | — | — | — | Smaller encoder with **16,281 WSIs** (1 tissue); image-only, multi-stain; **21 WSI-level** tasks. |
+| PathoDuet  | — | — | — | WSI encoder on **14,896 WSIs** (32 tissues); image-only, multi-resolution; **14 WSI-level** tasks. |
+| RudolfV    | — | — | — | Large FM with **133,998 WSIs** (58 tissues); image-only, multi-resolution, multi-stain, multiscanner; **50 tasks** (classification & segmentation, WSI & cell). |
+| PLUTO      | — | — | — | Pathology FM on **158,852 WSIs** (28 tissues); image-only, multi-resolution, multi-stain, multiscanner; **13 tasks** (classification & segmentation, WSI & cell). |
 
 
 
@@ -109,9 +127,21 @@ Summaries of foundation models (FMs) across modalities.
 | BioMedCLIP | [A Multimodal Biomedical Foundation Model Trained from Fifteen Million Image–Text Pairs](https://ai.nejm.org/doi/full/10.1056/AIoa2400640) | [microsoft/BiomedCLIP_data_pipeline](https://github.com/microsoft/BiomedCLIP_data_pipeline) | [HF](https://huggingface.co/microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224) | Pretrained on 15 million biomedical image–text pairs collected from 4.4 million scientific articles | 
 | PRISM | [PRISM: A Multi-Modal Generative Foundation Model for Slide-Level Histopathology](https://arxiv.org/pdf/2405.10254) | - | [HF](https://huggingface.co/paige-ai/Prism) | PRISM is a multi-modal generative foundation model for slide-level analysis of H&E-stained histopathology images, has PRISM2|
 | CONCH | [A visual-language foundation model for computational pathology](https://www.nature.com/articles/s41591-024-02856-4) | [mahmoodlab/CONCH](https://github.com/mahmoodlab/CONCH)| [HF](https://huggingface.co/MahmoodLab/conch) | CONtrastive learning from Captions for Histopathology (CONCH), a visual-language foundation model developed using diverse sources of histopathology images, biomedical text, and notably over 1.17 million image-caption pairs via task-agnostic pretraining, updated CONCH1.5|
-|THEADS| [Molecular-driven Foundation Model for Oncologic Pathology](https://arxiv.org/pdf/2501.16652) | - | - | Pretrained using a multimodal learning approach on a diverse cohort of 47,171 hematoxylin and eosin (H&E)-stained tissue sections, paired with corresponding genomic and transcriptomic profiles | 
-
-
+| THEADS| [Molecular-driven Foundation Model for Oncologic Pathology](https://arxiv.org/pdf/2501.16652) | - | - | Pretrained using a multimodal learning approach on a diverse cohort of 47,171 hematoxylin and eosin (H&E)-stained tissue sections, paired with corresponding genomic and transcriptomic profiles | 
+| OmiCLIP | [A visual–omics foundation model to bridge histopathology with spatial transcriptomics](https://doi.org/10.1038/s41592-025-02707-1) | [Github](https://github.com/ GuangyuWangLab2021/Loki/)| [HF](https://huggingface.co/WangGuangyuLab/Loki)
+| MUSK       | — | — | — | WSI + **text**; 33,000 WSIs; multi-resolution, multiscanner; **52 tasks**, including classification, segmentation and **visual question answering**. |
+| TITAN      | — | — | — | Large VLM with 335,645 WSIs + text; multi-resolution, multiscanner; **61 tasks**, including WSI-level classification and **report generation**. |
+| SlideChat  | — | — | — | Vision–language assistant on 4,181 WSIs + text; multi-tissue; **22 tasks**, focusing on WSI classification and **WSI–language assistant** use-cases. |
+| PMPRG      | — | — | — | Pathology VLM with 5,195 WSIs + text; supports **multi-organ report generation** plus WSI-level classification (5 tasks). |
+| mSTAR      | — | — | — | Multimodal FM on 14,621 WSIs with **text + molecular**; 32 tissues; **43 tasks**, including WSI classification and **multimodal report**. |
+| HistGen    | — | — | — | Generative histology VLM with 7,800 WSIs + text; **10 tasks**, including WSI classification and **report generation**. |
+| PathAlign  | — | — | — | Vision–language FM on 350,855 WSIs + text; multi-resolution; **10 tasks** combining classification with **report generation**. |
+| PathGen    | — | — | — | WSI–language assistant on 7,300 WSIs + text; multi-stain, multiscanner; **18 tasks**, including WSI-level classification and assistant-style generation. |
+| HistoGPT   | — | — | — | VLM on 15,129 WSIs + text; **9 tasks**, mixing slide-level classification with **WSI–language assistant** capabilities. |
+| PathChat   | — | — | — | AI assistant FM trained on 999,202 WSIs + text; multi-tissue, multi-resolution; **54 tasks**, including classification, segmentation and interactive assistance. |
+| PathAsst   | — | — | — | Vision–language **AI assistant** with 180,000 WSIs + text; multi-resolution, multi-stain; **5 tasks** including classification, segmentation and assistant use. |
+| Prov-GigaPathMM | — | — | — | Multimodal extension of Prov-GigaPath on 171,189 WSIs + text; multi-resolution; **26 tasks**, combining WSI classification/segmentation with **report generation**. |
+| PLIP       | — | — | — | Pathology vision–language model trained on 28,414 WSIs + text; multi-resolution, multiscanner; **26 tasks**, focused on slide-level classification and **captioning**. |
 
 
 ## 5) Review paper
@@ -131,6 +161,8 @@ Summaries of foundation models (FMs) across modalities.
 |-----------|-------|--------|:------------:|------|
 | Patho-Bench | [Accelerating Data Processing and Benchmarking of AI Models for Pathology](https://arxiv.org/pdf/2502.06750) | [mahmoodlab/Patho-Bench](https://github.com/mahmoodlab/Patho-Bench/tree/main) | [HF](https://huggingface.co/datasets/MahmoodLab/Patho-Bench) | Patho-Bench is designed to evaluate patch and slide encoder foundation models for whole-slide images (WSIs) | 
 | PathBench | [PathBench: A comprehensive comparison benchmark for pathology foundation models towards precision oncology](https://arxiv.org/pdf/2505.20202) | [birkhoffkiki/PathBench]([https://github.com/mahmoodlab/Patho-Bench/tree/main](https://github.com/birkhoffkiki/PathBench) | - | PathBench is a comprehensive, multi-task, multi-organ benchmark designed for real-world clinical performance evaluation of pathology foundation models towards precision oncology. This interactive web platform provides standardized evaluation metrics and comparative analysis across 20+ state-of-the-art pathology foundation models. | 
+| - | [A clinical benchmark of public selfsupervised pathology foundation models](https://doi.org/10.1038/s41467-025-58796-1) | [sinai-computational-pathology/SSL_tile_benchmarks](https://github.com/sinai-computational-pathology/SSL_tile_benchmarks) | - | - |
+| - | [Benchmarking Embedding Aggregation Methods in  Computational Pathology: A Clinical Data Perspective] | [sinai-computational-pathology/CPath_SABenchmark](https://github.com/sinai-computational-pathology/CPath_SABenchmark) | - | - |
 
 
 ----
