@@ -140,7 +140,7 @@ Summaries of foundation models (FMs) across modalities.
 | HistoGPT   | — | — | — | VLM on 15,129 WSIs + text; **9 tasks**, mixing slide-level classification with **WSI–language assistant** capabilities. |
 | PathChat   | — | — | — | AI assistant FM trained on 999,202 WSIs + text; multi-tissue, multi-resolution; **54 tasks**, including classification, segmentation and interactive assistance. |
 | PathAsst   | — | — | — | Vision–language **AI assistant** with 180,000 WSIs + text; multi-resolution, multi-stain; **5 tasks** including classification, segmentation and assistant use. |
-| Prov-GigaPathMM | — | — | — | Multimodal extension of Prov-GigaPath on 171,189 WSIs + text; multi-resolution; **26 tasks**, combining WSI classification/segmentation with **report generation**. |
+| Prov-GigaPath | [A whole-slide foundation model for digital pathology from real-world data](https://www.nature.com/articles/s41586-024-07441-w#code-availability) | [prov-gigapath/prov-gigapath](https://github.com/prov-gigapath/prov-gigapath) | [HF](https://huggingface.co/prov-gigapath/prov-gigapath)| Multimodal extension of Prov-GigaPath on 171,189 WSIs + text; multi-resolution; **26 tasks**, combining WSI classification/segmentation with **report generation**. |
 | PLIP       | — | — | — | Pathology vision–language model trained on 28,414 WSIs + text; multi-resolution, multiscanner; **26 tasks**, focused on slide-level classification and **captioning**. |
 
 
