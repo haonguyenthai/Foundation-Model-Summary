@@ -1,0 +1,2437 @@
+
+## Hibou-L Foundation Model: Large-Scale Self-Supervised Vision Transformer for Pathology
+
+### **Model Overview: Diversity-Driven Self-Supervised Learning**
+
+Hibou-L represents a **maximally diverse** pathology foundation model, trained on what is claimed to be "the most diverse large dataset collected for AI algorithm development" in digital pathology. Unlike models focused on specific tissue types or staining techniques, Hibou leverages:
+
+```
+Dataset Diversity:
+  ├─ 1,138,905 total WSIs
+  │   ├─ 936,441 H&E-stained slides (82.2%)
+  │   └─ 202,464 non-H&E stained slides (17.8%)
+  ├─ 306,400 unique patient cases
+  ├─ Human tissues (multiple anatomic sites)
+  ├─ Veterinary biopsies (cross-species)
+  └─ 2,676 cytology slides (smears, aspirates)
+
+Training Data:
+  ├─ Hibou-L: 1.2 billion clean tissue patches
+  └─ Hibou-B: 512 million clean tissue patches
+
+Key Innovation: Stain diversity + anatomic diversity + species diversity
+  → Enhanced generalization across clinical scenarios
+```
+
+**Philosophical Difference from Other Models:**
+
+| Model | Strategy | Philosophy |
+|-------|----------|------------|
+| **Hibou-L** | **Maximum diversity** | **"Learn everything from everywhere"** |
+| UNI | Broad H&E corpus | "Learn general H&E features" |
+| Virchow2 | Multi-magnification | "Learn across scales" |
+| GigaPath | Massive H&E + slide encoder | "Learn tiles + WSI context" |
+| H0-mini | Distillation | "Compress expert knowledge" |
+
+---
+
+### **Architecture: ViT-L/14 with DINOv2 + Registers**
+
+#### **Base Architecture Specifications**
+
+```yaml
+Model variant: Vision Transformer Large (ViT-L/14)
+Parameters: ~300M (0.3B) total
+Architecture type: Encoder-only transformer
+
+Input specifications:
+  Image size: 224×224 pixels
+  Patch size: 14×14 pixels
+  Number of patches: 16×16 = 256 patches
+  Channels: 3 (RGB)
+
+Token sequence:
+  [CLS] token: 1
+  Patch tokens: 256
+  Register tokens: 4 (DINOv2 registers innovation)
+  Total sequence length: 1 + 256 + 4 = 261 tokens
+
+Embedding dimension: 1,024 (vs. 768 for ViT-B)
+Transformer blocks: 24 layers (vs. 12 for ViT-B)
+Attention heads: 16 (64-D per head)
+MLP hidden dimension: 4,096 (4× expansion)
+MLP activation: GELU (Gaussian Error Linear Unit)
+
+Positional encoding: Learned 2D sinusoidal embeddings
+Normalization: Layer Normalization (pre-norm)
+Dropout: Not specified (likely 0.0 for DINOv2)
+
+Output representations:
+  - CLS token: 1,024-D global image representation
+  - Patch tokens: 256 × 1,024-D local features
+  - Register tokens: 4 × 1,024-D (auxiliary, usually discarded)
+```
+
+**Architecture Comparison:**
+
+| Variant | Parameters | Layers | Dim | Heads | Patches | Registers |
+|---------|------------|--------|-----|-------|---------|-----------|
+| **Hibou-L** | **~300M** | **24** | **1,024** | **16** | **256** | **4** |
+| Hibou-B | ~86M | 12 | 768 | 12 | 256 | 4 |
+| ViT-B/14 (baseline) | 86M | 12 | 768 | 12 | 256 | 0 |
+| ViT-L/14 (baseline) | 304M | 24 | 1,024 | 16 | 256 | 0 |
+| ViT-H/14 (Virchow2) | 632M | 32 | 1,280 | 16 | 256 | 4 |
+| ViT-g/14 (GigaPath) | 1,100M | 40 | 1,536 | 24 | 256 | 4 |
+
+**Why ViT-L/14?**
+
+```
+Sweet spot: Large enough for high capacity, small enough for efficiency
+
+Advantages:
+  ✅ 300M parameters → Strong representational capacity
+  ✅ 24 layers → Deep feature hierarchy
+  ✅ 1,024-D embeddings → Rich feature space
+  ✅ 14×14 patches → Good balance (vs. 16×16 coarser, 8×8 finer)
+  ✅ Faster than ViT-H (632M) or ViT-g (1.1B)
+  ✅ Better than ViT-B (86M) on complex tasks
+
+Trade-offs:
+  - Larger than ViT-B → More memory, slower inference
+  - Smaller than ViT-H/g → Slightly lower peak performance
+  ⚖️ Optimal for production deployment (speed + accuracy)
+```
+
+#### **Registers: Key DINOv2 Innovation**
+
+**What are Registers?**
+
+```python
+# Standard ViT sequence (without registers)
+sequence = [CLS] + patch_tokens  # Length: 257
+
+# DINOv2 with registers (Hibou uses this)
+sequence = [CLS] + register_tokens + patch_tokens
+#          ↑       ↑                 ↑
+#          1       4                 256
+# Total length: 261
+
+# Registers are learnable tokens that:
+# 1. Act as "sink" tokens for irrelevant information
+# 2. Reduce artifacts in attention maps
+# 3. Improve feature quality
+# 4. Are discarded during inference (use CLS/patches only)
+```
+
+**Why Registers Matter:**
+
+```
+Problem: Without registers
+  - Attention maps show artifacts (noisy high-attention regions)
+  - Background/irrelevant regions get attention
+  - CLS token contaminated with noise
+
+Solution: With registers
+  - Registers absorb low-level/irrelevant information
+  - Cleaner attention maps focused on informative regions
+  - Better CLS token representation
+  - Improved performance (+1-2% on benchmarks)
+
+Evidence: Darcet et al. 2023 "Vision Transformers Need Registers"
+  - Showed registers eliminate artifacts
+  - Standard practice in DINOv2 framework
+  - Adopted by: Virchow2, GigaPath, RudolfV, Hibou
+```
+
+**Register Implementation:**
+
+```python
+class ViTWithRegisters(nn.Module):
+    def __init__(self, num_registers=4, embed_dim=1024):
+        super().__init__()
+        
+        # Standard ViT components
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.patch_embed = PatchEmbed(...)
+        self.pos_embed = nn.Parameter(torch.zeros(1, 257, embed_dim))
+        
+        # Registers (NEW in DINOv2)
+        self.register_tokens = nn.Parameter(
+            torch.zeros(1, num_registers, embed_dim)
+        )
+        
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(embed_dim) for _ in range(24)
+        ])
+        
+        self.norm = nn.LayerNorm(embed_dim)
+    
+    def forward(self, x):
+        B = x.shape[0]
+        
+        # Patch embedding
+        x = self.patch_embed(x)  # (B, 256, 1024)
+        
+        # Add CLS token
+        cls_token = self.cls_token.expand(B, -1, -1)  # (B, 1, 1024)
+        
+        # Add register tokens
+        register_tokens = self.register_tokens.expand(B, -1, -1)  # (B, 4, 1024)
+        
+        # Concatenate: [CLS] + [REG1, REG2, REG3, REG4] + [patches]
+        x = torch.cat([cls_token, register_tokens, x], dim=1)  # (B, 261, 1024)
+        
+        # Add positional embeddings (broadcast to include registers)
+        x = x + self.interpolate_pos_encoding(x)
+        
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x)
+        
+        x = self.norm(x)
+        
+        # Split outputs
+        cls_output = x[:, 0]          # (B, 1024) - Global representation
+        register_output = x[:, 1:5]   # (B, 4, 1024) - Usually discarded
+        patch_output = x[:, 5:]       # (B, 256, 1024) - Local features
+        
+        return cls_output, patch_output  # Registers discarded
+```
+
+---
+
+### **DINOv2 Self-Supervised Learning Framework**
+
+#### **Core Methodology: Self-Distillation without Labels**
+
+**DINOv2 Overview:**
+
+```
+Philosophy: Learn visual representations from images alone
+  - No human annotations required
+  - Learns by predicting image transformations
+  - Student-teacher self-distillation paradigm
+
+Key Components:
+  1. Student network (trainable)
+  2. Teacher network (exponential moving average of student)
+  3. DINO loss (global image-level)
+  4. iBOT loss (local patch-level with masking)
+  5. Multi-crop augmentation strategy
+```
+
+**Training Paradigm:**
+
+```
+Input image → Multiple augmented views
+   │
+   ├─→ Global crops (224×224) → Student + Teacher
+   │    • 2 global crops per image
+   │    • Full resolution
+   │
+   └─→ Local crops (96×96) → Student only
+        • Typically 8-10 local crops
+        • Smaller field of view
+        • Hibou: Uses only global crops (2 views)
+
+Student (trainable):
+  - Processes all views (global + local)
+  - Tries to match teacher's predictions
+  - Updated via gradient descent
+
+Teacher (EMA, frozen):
+  - Processes only global views
+  - Provides "soft targets" for student
+  - Updated via EMA: θ_teacher ← m × θ_teacher + (1-m) × θ_student
+  - Momentum m = 0.996 (typical)
+```
+
+#### **Loss Functions**
+
+**1. DINO Loss (Global Image-Level Distillation)**
+
+```python
+def dino_loss(student_output, teacher_output, temperature_s=0.1, temperature_t=0.04):
+    """
+    Cross-entropy between student and teacher predictions
+    Using different temperatures for sharpening
+    
+    Args:
+        student_output: (B, num_prototypes) logits from student
+        teacher_output: (B, num_prototypes) logits from teacher
+        temperature_s: Student temperature (higher = softer)
+        temperature_t: Teacher temperature (lower = sharper)
+    
+    Returns:
+        loss: Scalar DINO loss
+    """
+    # Teacher predictions (sharper, more confident)
+    teacher_probs = F.softmax(teacher_output / temperature_t, dim=-1)
+    teacher_probs = teacher_probs.detach()  # No gradient through teacher
+    
+    # Student predictions (softer, more uncertain)
+    student_log_probs = F.log_softmax(student_output / temperature_s, dim=-1)
+    
+    # Cross-entropy loss (KL divergence)
+    loss = -torch.sum(teacher_probs * student_log_probs, dim=-1).mean()
+    
+    return loss
+
+# Mathematical formulation:
+# L_DINO = - Σ P_t(k) × log P_s(k)
+# where:
+#   P_t(k) = exp(z_t[k] / τ_t) / Σ_j exp(z_t[j] / τ_t)  # Teacher softmax
+#   P_s(k) = exp(z_s[k] / τ_s) / Σ_j exp(z_s[j] / τ_s)  # Student softmax
+#   τ_t = 0.04 (sharp), τ_s = 0.1 (soft)
+```
+
+**Why Different Temperatures?**
+
+```
+Teacher (τ=0.04, sharp):
+  - More confident predictions
+  - Focuses on most likely classes
+  - Acts as "hard target"
+  
+Student (τ=0.1, soft):
+  - More uncertain predictions
+  - Explores probability space
+  - Learns to match teacher's confidence
+
+Effect:
+  Teacher: [0.8, 0.15, 0.05] (sharp, confident)
+  Student: [0.5, 0.3, 0.2] (soft, exploratory)
+  → Student learns to become more confident like teacher
+```
+
+**2. iBOT Loss (Patch-Level Masked Image Modeling)**
+
+```python
+def ibot_loss(student_patches, teacher_patches, mask):
+    """
+    Masked image modeling: Predict masked patches from context
+    
+    Args:
+        student_patches: (B, 256, 1024) student patch embeddings
+        teacher_patches: (B, 256, 1024) teacher patch embeddings
+        mask: (B, 256) boolean mask (True = masked, False = visible)
+    
+    Returns:
+        loss: Scalar iBOT loss
+    """
+    # Only supervise masked patches
+    student_masked = student_patches[mask]  # (num_masked, 1024)
+    teacher_masked = teacher_patches[mask]  # (num_masked, 1024)
+    
+    # Project to prototype space
+    student_logits = prototype_head(student_masked)  # (num_masked, 65536)
+    teacher_logits = prototype_head(teacher_masked)  # (num_masked, 65536)
+    
+    # Cross-entropy loss (same as DINO)
+    teacher_probs = F.softmax(teacher_logits / 0.04, dim=-1).detach()
+    student_log_probs = F.log_softmax(student_logits / 0.1, dim=-1)
+    
+    loss = -torch.sum(teacher_probs * student_log_probs, dim=-1).mean()
+    
+    return loss
+
+# Masking strategy (DINOv2 default)
+mask_ratio = 0.4  # 40% of patches masked
+# For 256 patches → ~102 patches masked
+# Student must predict masked patches from context of visible 154 patches
+```
+
+**iBOT Intuition:**
+
+```
+Scenario: Pathology image with glands and stroma
+
+Original image (256 patches):
+  Patches 1-128: Glandular epithelium
+  Patches 129-256: Stromal tissue
+
+Masking (40%):
+  Masked: Random 102 patches (e.g., 50 glands + 52 stroma)
+  Visible: Remaining 154 patches
+
+Student task:
+  - See visible patches (154)
+  - Predict features of masked patches (102)
+  - Forces understanding of spatial relationships
+  
+Example:
+  Visible: [gland edge, stroma border, ...]
+  Masked: [gland center]
+  → Student learns: "gland edge + border → gland center likely"
+  → Builds spatial understanding of tissue architecture
+```
+
+**3. Total DINOv2 Loss**
+
+```python
+def dinov2_loss(student_global, teacher_global,
+                student_patches, teacher_patches, mask):
+    """
+    Combined DINO + iBOT loss
+    
+    Args:
+        student_global: (B, 1024) CLS token from student
+        teacher_global: (B, 1024) CLS token from teacher
+        student_patches: (B, 256, 1024) patch tokens
+        teacher_patches: (B, 256, 1024) patch tokens
+        mask: (B, 256) masking for iBOT
+    
+    Returns:
+        total_loss: Weighted combination
+    """
+    # DINO loss (global)
+    loss_dino = dino_loss(student_global, teacher_global)
+    
+    # iBOT loss (local, masked)
+    loss_ibot = ibot_loss(student_patches, teacher_patches, mask)
+    
+    # Total loss (equal weighting typical)
+    total_loss = loss_dino + loss_ibot
+    
+    return total_loss
+
+# Note: DINOv2 also includes:
+#   - KoLeo regularization (optional, not mentioned for Hibou)
+#   - Stochastic depth (optional)
+#   - Specific hyperparameters vary by implementation
+```
+
+---
+
+### **Pretraining Data: Maximum Diversity Philosophy**
+
+#### **Overall Dataset Statistics**
+
+```yaml
+Total WSIs: 1,138,905 whole-slide images
+  H&E-stained: 936,441 slides (82.2%)
+  Non-H&E stained: 202,464 slides (17.8%)
+
+Unique cases: 306,400 patients/specimens
+
+Tissue sources:
+  - Human tissues: Multiple anatomic sites (exact distribution not specified)
+  - Veterinary biopsies: Cross-species (dogs, cats, etc.)
+  - Cytology: 2,676 slides (smears, fine-needle aspirates, touch preps)
+
+Staining diversity (non-H&E examples):
+  - Immunohistochemistry (IHC): Various antibodies
+  - Special stains: Trichrome, PAS, Silver, etc.
+  - Other histochemical stains
+
+Geographic source: Proprietary dataset (HistAI)
+  - Not publicly available
+  - Claims: "Most diverse large dataset for AI in pathology"
+```
+
+**Tissue Distribution (from Figure 1 in paper):**
+
+The paper provides a pie chart showing tissue type distribution, though exact percentages are not numerically specified. Based on visual inspection:
+
+```
+Major tissue categories (approximate):
+  - Gastrointestinal: ~20-25%
+  - Reproductive organs: ~15-20%
+  - Lung/Respiratory: ~10-15%
+  - Skin: ~10-15%
+  - Breast: ~10%
+  - Other organs: ~25-30%
+
+Stain distribution (approximate from Figure 1):
+  H&E: 82.2% (dominant)
+  IHC stains: ~10-12%
+  Special stains: ~3-5%
+  Other: ~1-3%
+```
+
+**Why This Diversity Matters:**
+
+```
+Cross-Stain Robustness:
+  - Training on H&E + IHC + special stains
+  - Learns stain-invariant features
+  - Generalizes better to unseen staining protocols
+
+Cross-Tissue Generalization:
+  - Wide anatomic coverage
+  - Common morphological patterns (epithelium, stroma, etc.)
+  - Tissue-agnostic feature learning
+
+Cross-Species Learning:
+  - Human + veterinary biopsies
+  - Similar tissue architectures across mammals
+  - Enhanced biological feature understanding
+
+Cytology Inclusion:
+  - Different preparation (smears vs. sections)
+  - Different morphology (individual cells vs. tissue)
+  - Broader applicability (pap smears, FNAB, etc.)
+```
+
+#### **Data Preprocessing Pipeline**
+
+**1. Tile Extraction**
+
+```python
+def extract_tiles_for_hibou(wsi_path):
+    """
+    Hibou tile extraction: Non-overlapping patches with background filtering
+    
+    Args:
+        wsi_path: Path to whole-slide image
+    
+    Returns:
+        filtered_tiles: List of tissue patches (224×224 RGB)
+    """
+    # Step 1: Load WSI
+    slide = openslide.OpenSlide(wsi_path)
+    
+    # Step 2: Otsu thresholding for background detection
+    # Convert to grayscale thumbnail for fast processing
+    thumbnail = slide.get_thumbnail((2000, 2000))
+    gray = cv2.cvtColor(np.array(thumbnail), cv2.COLOR_RGB2GRAY)
+    
+    # Otsu's method: Automatic threshold selection
+    # Separates tissue (darker) from background (lighter)
+    threshold, binary_mask = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+    
+    # Step 3: Extract tiles at 224×224 pixels
+    tile_size = 224
+    magnification = 20  # 20× magnification (typical)
+    tiles = []
+    coords = []
+    
+    # Grid-based extraction (non-overlapping)
+    for y in range(0, slide.dimensions[1], tile_size):
+        for x in range(0, slide.dimensions[0], tile_size):
+            # Check if tile is tissue (using downsampled mask)
+            mask_y = int(y * thumbnail.size[1] / slide.dimensions[1])
+            mask_x = int(x * thumbnail.size[0] / slide.dimensions[0])
+            
+            if binary_mask[mask_y, mask_x] > 0:  # Is tissue
+                # Extract tile at 20×
+                tile = slide.read_region(
+                    (x, y), 
+                    level=0, 
+                    size=(tile_size, tile_size)
+                ).convert('RGB')
+                
+                tiles.append(tile)
+                coords.append((x, y))
+    
+    return tiles, coords
+
+# Key specifications
+Tile size: 224×224 pixels
+Magnification: 20× (0.5 μm/pixel, typical)
+Overlap: 0% (non-overlapping grid)
+Background filtering: Otsu thresholding
+  - Automatic threshold selection
+  - Separates tissue from glass/background
+  - Filters out <10% tissue coverage tiles
+
+Result for typical WSI:
+  - Input: 40,000×60,000 pixels @ 20×
+  - Output: ~5,000-15,000 tiles (depends on tissue coverage)
+```
+
+**2. Dataset Creation for Training**
+
+```python
+# Hibou-L: 1.2 billion clean patches
+# Hibou-B: 512 million clean patches
+
+# Process:
+# 1. Extract tiles from all 1.1M WSIs
+# 2. Apply Otsu thresholding to each tile
+# 3. Filter out background patches
+# 4. Create "filtered dataset" of clean tissue patches
+
+# Training strategy:
+# - Random sampling from filtered dataset
+# - Each unique patch sampled ONLY ONCE per training
+# - No repetition until new epoch (prevents overfitting)
+
+# Example for Hibou-L:
+total_wsis = 1_138_905
+avg_tiles_per_wsi = 1_200_000_000 / 1_138_905  # ~1,053 tiles/WSI
+
+# This seems lower than typical (5,000-15,000)
+# Likely explanation:
+#   - Some WSIs are smaller (biopsies, cytology)
+#   - Aggressive background filtering
+#   - Non-H&E slides may have less tissue
+#   - Veterinary slides may be smaller specimens
+```
+
+**Comparison with Other Models:**
+
+| Model | WSIs | Patches | Source | Diversity |
+|-------|------|---------|--------|-----------|
+| **Hibou-L** | **1.1M** | **1.2B** | **Proprietary** | **H&E + non-H&E + vet + cyto** |
+| GigaPath | 171K | 1.3B | TCGA + others | H&E only |
+| Virchow2 | 3.1M | Not specified | Paige + H&E sources | H&E, multi-mag |
+| UNI | 100K | 100M | Mass-100K + TCGA | H&E only |
+| Phikon | 6K | 43M | TCGA PanCancer40M | H&E only |
+| H0-mini | 6K | 43M | TCGA PanCancer40M | H&E only |
+
+**Hibou's Unique Position:**
+- 2nd largest WSI count (after Virchow2's 3.1M)
+- 2nd largest patch count (after GigaPath's 1.3B)
+- **MOST diverse** (stains + species + slide types)
+
+---
+
+### **Data Augmentation Strategy**
+
+**Augmentation Pipeline (Modified for Pathology):**
+
+```python
+def hibou_augmentations(image):
+    """
+    Hibou-specific augmentations for pathology images
+    Based on DINOv2 with pathology-specific modifications
+    
+    Args:
+        image: PIL Image (224×224 RGB)
+    
+    Returns:
+        augmented: Augmented image tensor
+    """
+    # 1. Random Angle Rotation (pathology-specific)
+    # Not just 90° increments - ANY angle
+    # Citation: Alfasly et al. 2024 "Rotation-agnostic image representation"
+    angle = np.random.uniform(0, 360)  # Full 360° rotation
+    image = TF.rotate(image, angle)
+    
+    # 2. Random Horizontal and Vertical Flips
+    if np.random.rand() > 0.5:
+        image = TF.hflip(image)
+    if np.random.rand() > 0.5:
+        image = TF.vflip(image)
+    
+    # 3. RandStainNA (pathology-specific stain augmentation)
+    # Citation: Shen et al. 2022 "RandStainNA: Learning Stain-Agnostic Features"
+    # Bridges stain augmentation and normalization
+    image = randstain_na(image)
+    
+    # 4. Color Jittering (standard computer vision)
+    color_jitter = transforms.ColorJitter(
+        brightness=0.4,  # ±40% brightness
+        contrast=0.4,    # ±40% contrast
+        saturation=0.4,  # ±40% saturation
+        hue=0.1          # ±10% hue
+    )
+    image = color_jitter(image)
+    
+    # EXCLUDED: Solarization (following RudolfV)
+    # Reason: Creates unrealistic histology appearance
+    # Standard DINOv2 includes it, pathology models don't
+    
+    # Convert to tensor and normalize
+    tensor = TF.to_tensor(image)
+    tensor = TF.normalize(
+        tensor,
+        mean=[0.485, 0.456, 0.406],  # ImageNet stats
+        std=[0.229, 0.224, 0.225]
+    )
+    
+    return tensor
+```
+
+**Key Augmentations Explained:**
+
+**1. Random Angle Rotation (360°)**
+
+```
+Why rotation matters in pathology:
+  - Tissue slides can be oriented any direction
+  - No "canonical" up/down (unlike natural images)
+  - Pathologists view slides rotated during diagnosis
+
+Standard approach: 90° increments (0°, 90°, 180°, 270°)
+Hibou approach: ANY angle from 0-360°
+
+Benefit:
+  - True rotation invariance
+  - Model can't rely on orientation cues
+  - Better generalization to rotated slides in deployment
+
+Evidence: Alfasly et al. 2024 showed continuous rotation
+  outperforms discrete 90° rotations for pathology
+```
+
+**2. RandStainNA (Stain Normalization + Augmentation)**
+
+```python
+def randstain_na(image):
+    """
+    RandStainNA: Stain augmentation via random matrix perturbation
+    
+    Strategy:
+      1. Decompose H&E image into H (hematoxylin) and E (eosin) channels
+      2. Apply random perturbations to stain matrix
+      3. Reconstruct augmented image
+    
+    Effect:
+      - Simulates staining variations (lab-to-lab, batch-to-batch)
+      - More realistic than simple color jitter for H&E
+      - Improves stain robustness
+    
+    Benefit over standard color jitter:
+      - Preserves biological structure (H = nuclei, E = cytoplasm)
+      - Color jitter can create unrealistic combinations
+      - RandStainNA stays within H&E color space
+    """
+    # Stain matrix perturbation (simplified)
+    H_perturb = np.random.randn(3) * 0.05  # Small perturbation
+    E_perturb = np.random.randn(3) * 0.05
+    
+    # Apply to stain channels
+    # (Full implementation complex, see Shen et al. 2022)
+    augmented_image = apply_stain_perturbation(image, H_perturb, E_perturb)
+    
+    return augmented_image
+```
+
+**Why RandStainNA + Color Jitter?**
+
+```
+RandStainNA: Pathology-specific (H&E color space)
+  ✅ Realistic H&E variations
+  ✅ Preserves nuclear/cytoplasmic distinction
+  ❌ Only works for H&E
+
+Color Jitter: General-purpose
+  ✅ Works for any stain (IHC, special stains, etc.)
+  ✅ Handles non-H&E in Hibou dataset
+  ❌ Can create unrealistic H&E
+
+Combined:
+  → RandStainNA for H&E-specific robustness
+  → Color jitter for general color variations
+  → Best of both worlds
+```
+
+**3. Excluded Augmentations**
+
+```
+NO Solarization:
+  - Standard DINOv2 includes solarization
+  - Inverts pixel intensities above threshold
+  - Creates unrealistic histology (e.g., dark nuclei → bright)
+  - RudolfV also excludes solarization
+  - Hibou follows this pathology-specific modification
+
+NO Gaussian Blur:
+  - Not mentioned in Hibou paper
+  - May or may not be included (unclear)
+  - Standard DINOv2 uses blur
+
+NO Multi-Scale Cropping:
+  - DINOv2: 2 global (224×224) + 8-10 local (96×96) crops
+  - Hibou: Only 2 global crops (based on paper description)
+  - Simpler, faster training
+```
+
+**Multi-Crop Strategy (DINOv2 Standard):**
+
+```
+Standard DINOv2:
+  Input image → 12 augmented views
+    ├─ 2 global crops (224×224)
+    └─ 10 local crops (96×96)
+
+Hibou (appears to use):
+  Input image → 2 augmented views
+    └─ 2 global crops (224×224)
+    
+Rationale (likely):
+  - Pathology tiles already small (224×224)
+  - Local crops (96×96) may lose context
+  - Global-only sufficient for patch-level learning
+  - Faster training (fewer forward passes)
+```
+
+---
+
+### **Training Configuration & Hyperparameters**
+
+#### **Hibou-L Exact Training Specifications**
+
+```yaml
+# Hardware
+GPUs: 32× NVIDIA A100-40GB
+  - A100 architecture (Ampere)
+  - 40GB VRAM per GPU
+  - Total VRAM: 1,280 GB
+  - Estimated cost: ~$10-15/GPU-hour × 32 GPUs
+  
+# Training iterations
+Total iterations: 1,175,000 (1.175 million)
+Batch size: 1,024 (global)
+  - Per-GPU batch size: 1,024 / 32 = 32 images/GPU
+  - Total images seen: 1,175,000 × 1,024 = 1.2 billion
+  - Matches dataset size (1.2B clean patches)
+  → Each patch seen EXACTLY ONCE
+
+# Training duration (estimated)
+Iterations: 1,175,000
+Time per iteration: ~2-3 seconds (estimated)
+Total time: ~650-1,000 hours wall-clock
+  = ~27-42 days continuous training
+GPU hours: 32 GPUs × 650-1,000 hours = 20,800-32,000 GPU hours
+Cost estimate: $200,000-$480,000 (at $10-15/GPU-hour)
+
+# Initialization
+Weight initialization: Random (Xavier/He initialization)
+  - Not pretrained on ImageNet
+  - Not pretrained on natural images
+  - Pure self-supervised from scratch on pathology data
+
+# Optimizer (DINOv2 defaults, likely)
+Optimizer: AdamW
+Learning rate: 0.001 (1e-3, typical DINOv2)
+  - Scaled with batch size: lr_actual = 0.001 × (batch_size / 256)
+  - For batch 1024: lr = 0.001 × 4 = 0.004
+Weight decay: 0.04 (typical DINOv2)
+Betas: (0.9, 0.999) (Adam defaults)
+
+# Learning rate schedule (DINOv2 typical)
+Schedule: Cosine decay with warmup
+Warmup iterations: ~10,000 (typical, ~1% of total)
+  - Linear warmup from 0 to max LR
+Final LR: ~1e-6 (0.001× initial)
+
+# Regularization
+Dropout: 0.0 (typical for ViT)
+Stochastic depth: Not specified (may or may not be used)
+Label smoothing: Not applicable (self-supervised)
+
+# EMA Teacher
+Teacher update: Exponential moving average
+Momentum: 0.996 (typical DINOv2)
+  θ_teacher ← 0.996 × θ_teacher + 0.004 × θ_student
+Update frequency: Every iteration
+
+# Mixed precision
+Likely uses fp16 (half precision) for efficiency
+  - A100 has excellent fp16 performance
+  - Reduces memory footprint
+  - Speeds up training 2-3×
+  - Standard for large-scale training
+```
+
+#### **Hibou-B Training (for comparison)**
+
+```yaml
+# Hardware
+GPUs: 8× NVIDIA A100-80GB
+  - Larger VRAM (80GB vs. 40GB)
+  - Fewer GPUs (8 vs. 32)
+
+# Training iterations
+Total iterations: 500,000 (500K)
+Batch size: 1,024 (global)
+  - Per-GPU batch size: 1,024 / 8 = 128 images/GPU
+  - Total images: 500K × 1,024 = 512 million
+  → Matches smaller dataset for Hibou-B
+
+# Training duration (estimated)
+Wall-clock time: ~10-15 days
+GPU hours: 8 GPUs × 240-360 hours = 1,920-2,880 GPU hours
+Cost: ~$19,000-$43,000
+
+# Model size
+Parameters: ~86M (vs. ~300M for Hibou-L)
+Layers: 12 (vs. 24 for Hibou-L)
+Embedding: 768-D (vs. 1,024-D for Hibou-L)
+```
+
+**Training Efficiency Comparison:**
+
+| Variant | Parameters | Iterations | Patches | GPUs | GPU-Hours | Cost (est.) |
+|---------|------------|------------|---------|------|-----------|-------------|
+| **Hibou-L** | **300M** | **1.175M** | **1.2B** | **32× A100-40G** | **~26,000** | **~$340K** |
+| Hibou-B | 86M | 500K | 512M | 8× A100-80G | ~2,400 | ~$31K |
+| Ratio | 3.5× | 2.35× | 2.34× | 4× (GPUs) | 10.8× | 11× |
+
+**Key Insights:**
+
+```
+Training cost scales super-linearly with model size:
+  - Hibou-L is 3.5× larger than Hibou-B
+  - But costs ~11× more to train
+  - Why? More GPUs + more iterations + longer per iteration
+
+Patch utilization:
+  - Hibou-L: 1.2B patches, 1.175M iters × 1024 batch = 1.2B
+    → Perfect match, each patch seen once
+  - Hibou-B: 512M patches, 500K iters × 1024 batch = 512M
+    → Perfect match, each patch seen once
+
+Strategy: One epoch per model
+  - No multi-epoch training
+  - Prevents overfitting to repeated data
+  - Common in large-scale self-supervised learning
+```
+
+---
+
+### **DINOv2 Training Algorithm (Hibou Implementation)**
+
+```python
+# Complete Hibou-L training loop
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+def train_hibou_l():
+    """
+    Hibou-L training using DINOv2 framework
+    """
+    # === Model Initialization ===
+    
+    # Student network (trainable)
+    student = ViTLarge14(
+        img_size=224,
+        patch_size=14,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        num_registers=4
+    ).cuda()
+    
+    # Teacher network (EMA of student)
+    teacher = ViTLarge14(
+        img_size=224,
+        patch_size=14,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        num_registers=4
+    ).cuda()
+    
+    # Initialize teacher with student weights
+    teacher.load_state_dict(student.state_dict())
+    
+    # Freeze teacher (no gradient computation)
+    for param in teacher.parameters():
+        param.requires_grad = False
+    
+    # Projection heads for DINO and iBOT
+    dino_head_student = DINOHead(
+        in_dim=1024,
+        out_dim=65536,  # Number of prototypes
+        hidden_dim=2048
+    ).cuda()
+    
+    dino_head_teacher = DINOHead(
+        in_dim=1024,
+        out_dim=65536,
+        hidden_dim=2048
+    ).cuda()
+    dino_head_teacher.load_state_dict(dino_head_student.state_dict())
+    dino_head_teacher.requires_grad_(False)
+    
+    ibot_head_student = iBOTHead(
+        in_dim=1024,
+        out_dim=65536,
+        patch_out_dim=8192  # Smaller for patches
+    ).cuda()
+    
+    ibot_head_teacher = iBOTHead(
+        in_dim=1024,
+        out_dim=65536,
+        patch_out_dim=8192
+    ).cuda()
+    ibot_head_teacher.load_state_dict(ibot_head_student.state_dict())
+    ibot_head_teacher.requires_grad_(False)
+    
+    # === Optimizer Setup ===
+    
+    params = (
+        list(student.parameters()) +
+        list(dino_head_student.parameters()) +
+        list(ibot_head_student.parameters())
+    )
+    
+    optimizer = torch.optim.AdamW(
+        params,
+        lr=0.004,  # 0.001 × 4 (scaled with batch size)
+        weight_decay=0.04,
+        betas=(0.9, 0.999)
+    )
+    
+    # Cosine learning rate schedule with warmup
+    total_iters = 1_175_000
+    warmup_iters = 10_000
+    
+    def lr_schedule(iteration):
+        if iteration < warmup_iters:
+            # Linear warmup
+            return iteration / warmup_iters
+        else:
+            # Cosine decay
+            progress = (iteration - warmup_iters) / (total_iters - warmup_iters)
+            return 0.5 * (1 + np.cos(np.pi * progress))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_schedule)
+    
+    # === Data Loading ===
+    
+    dataset = HibouDataset(
+        patch_dir='/path/to/filtered/patches',  # 1.2B patches
+        augmentations=hibou_augmentations
+    )
+    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=32,  # Per-GPU (1024 total / 32 GPUs)
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        drop_last=True
+    )
+    
+    # === Training Loop ===
+    
+    student.train()
+    teacher.eval()
+    
+    iteration = 0
+    ema_momentum = 0.996
+    
+    scaler = torch.cuda.amp.GradScaler()  # Mixed precision
+    
+    for epoch in range(1):  # Single epoch (1.2B patches)
+        for batch_idx, images in enumerate(dataloader):
+            iteration += 1
+            
+            # Generate two augmented views per image
+            images = images.cuda()  # (32, 3, 224, 224)
+            view1 = hibou_augmentations(images)  # (32, 3, 224, 224)
+            view2 = hibou_augmentations(images)  # (32, 3, 224, 224)
+            
+            # === Teacher Forward Pass (no gradient) ===
+            
+            with torch.no_grad():
+                with torch.cuda.amp.autocast():
+                    # View 1
+                    teacher_cls1, teacher_patches1 = teacher(view1)
+                    teacher_dino1 = dino_head_teacher(teacher_cls1)
+                    
+                    # View 2
+                    teacher_cls2, teacher_patches2 = teacher(view2)
+                    teacher_dino2 = dino_head_teacher(teacher_cls2)
+                    
+                    # iBOT teacher outputs (all patches)
+                    teacher_ibot1 = ibot_head_teacher(teacher_patches1)
+                    teacher_ibot2 = ibot_head_teacher(teacher_patches2)
+            
+            # === Student Forward Pass (trainable) ===
+            
+            with torch.cuda.amp.autocast():
+                # View 1
+                student_cls1, student_patches1 = student(view1)
+                student_dino1 = dino_head_student(student_cls1)
+                
+                # View 2
+                student_cls2, student_patches2 = student(view2)
+                student_dino2 = dino_head_student(student_cls2)
+                
+                # Generate random mask for iBOT (40% patches)
+                mask = torch.rand(32, 256) < 0.4  # (batch, num_patches)
+                mask = mask.cuda()
+                
+                # iBOT student outputs (masked patches)
+                student_ibot1 = ibot_head_student(student_patches1)
+                student_ibot2 = ibot_head_student(student_patches2)
+                
+                # === DINO Loss (asymmetric) ===
+                
+                # Teacher view 1 → Student view 2
+                loss_dino_12 = dino_loss(
+                    student_dino2,
+                    teacher_dino1,
+                    temp_student=0.1,
+                    temp_teacher=0.04
+                )
+                
+                # Teacher view 2 → Student view 1
+                loss_dino_21 = dino_loss(
+                    student_dino1,
+                    teacher_dino2,
+                    temp_student=0.1,
+                    temp_teacher=0.04
+                )
+                
+                loss_dino = (loss_dino_12 + loss_dino_21) / 2
+                
+                # === iBOT Loss (masked patches) ===
+                
+                # View 1 masked
+                loss_ibot_1 = ibot_loss(
+                    student_ibot1[mask],
+                    teacher_ibot1[mask],
+                    temp_student=0.1,
+                    temp_teacher=0.04
+                )
+                
+                # View 2 masked
+                loss_ibot_2 = ibot_loss(
+                    student_ibot2[mask],
+                    teacher_ibot2[mask],
+                    temp_student=0.1,
+                    temp_teacher=0.04
+                )
+                
+                loss_ibot = (loss_ibot_1 + loss_ibot_2) / 2
+                
+                # === Total Loss ===
+                
+                loss = loss_dino + loss_ibot
+            
+            # === Backward Pass ===
+            
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=3.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            
+            # === Update Teacher (EMA) ===
+            
+            with torch.no_grad():
+                for param_s, param_t in zip(student.parameters(), teacher.parameters()):
+                    param_t.data.mul_(ema_momentum).add_(
+                        param_s.data, alpha=1 - ema_momentum
+                    )
+                
+                for param_s, param_t in zip(
+                    dino_head_student.parameters(),
+                    dino_head_teacher.parameters()
+                ):
+                    param_t.data.mul_(ema_momentum).add_(
+                        param_s.data, alpha=1 - ema_momentum
+                    )
+                
+                for param_s, param_t in zip(
+                    ibot_head_student.parameters(),
+                    ibot_head_teacher.parameters()
+                ):
+                    param_t.data.mul_(ema_momentum).add_(
+                        param_s.data, alpha=1 - ema_momentum
+                    )
+            
+            # === Logging ===
+            
+            if iteration % 1000 == 0:
+                print(f"Iter {iteration}/{total_iters} | "
+                      f"Loss: {loss.item():.4f} | "
+                      f"DINO: {loss_dino.item():.4f} | "
+                      f"iBOT: {loss_ibot.item():.4f} | "
+                      f"LR: {scheduler.get_last_lr()[0]:.6f}")
+            
+            # === Checkpointing ===
+            
+            if iteration % 50000 == 0:
+                torch.save({
+                    'iteration': iteration,
+                    'student': student.state_dict(),
+                    'teacher': teacher.state_dict(),
+                    'dino_head_s': dino_head_student.state_dict(),
+                    'dino_head_t': dino_head_teacher.state_dict(),
+                    'ibot_head_s': ibot_head_student.state_dict(),
+                    'ibot_head_t': ibot_head_teacher.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }, f'hibou_l_checkpoint_{iteration}.pth')
+    
+    # === Final Model ===
+    
+    # Return teacher (typically better than student)
+    return teacher
+
+# === Supporting Functions ===
+
+def dino_loss(student_output, teacher_output, temp_student=0.1, temp_teacher=0.04):
+    """DINO cross-entropy loss"""
+    teacher_probs = F.softmax(teacher_output / temp_teacher, dim=-1)
+    teacher_probs = teacher_probs.detach()
+    
+    student_log_probs = F.log_softmax(student_output / temp_student, dim=-1)
+    
+    loss = -torch.sum(teacher_probs * student_log_probs, dim=-1).mean()
+    return loss
+
+def ibot_loss(student_output, teacher_output, temp_student=0.1, temp_teacher=0.04):
+    """iBOT cross-entropy loss (same as DINO but for patches)"""
+    return dino_loss(student_output, teacher_output, temp_student, temp_teacher)
+
+class DINOHead(nn.Module):
+    """Projection head for DINO loss"""
+    def __init__(self, in_dim, out_dim, hidden_dim=2048):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_dim)
+        )
+    
+    def forward(self, x):
+        return self.mlp(x)
+
+class iBOTHead(nn.Module):
+    """Projection head for iBOT loss"""
+    def __init__(self, in_dim, out_dim, patch_out_dim=8192):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, patch_out_dim),
+            nn.GELU(),
+            nn.Linear(patch_out_dim, patch_out_dim),
+            nn.GELU(),
+            nn.Linear(patch_out_dim, out_dim)
+        )
+    
+    def forward(self, x):
+        # x: (B, 256, 1024) patch tokens
+        # or (num_masked, 1024) masked patch tokens
+        return self.mlp(x)
+```
+
+---
+
+### **Performance Benchmarks**
+
+#### **Patch-Level Linear Probing**
+
+**Evaluation Protocol:**
+
+```python
+def linear_probe_evaluation(pretrained_model, dataset):
+    """
+    Standard linear probing protocol for patch classification
+    
+    Args:
+        pretrained_model: Frozen Hibou-L backbone
+        dataset: Classification dataset (e.g., CRC-100K)
+    
+    Returns:
+        accuracy: Top-1 classification accuracy
+    """
+    # Freeze backbone
+    pretrained_model.eval()
+    for param in pretrained_model.parameters():
+        param.requires_grad = False
+    
+    # Add linear classifier
+    classifier = nn.Linear(1024, num_classes).cuda()
+    
+    # Optimizer (SGD standard for linear probing)
+    optimizer = torch.optim.SGD(
+        classifier.parameters(),
+        lr=0.01,  # Typical for linear probing
+        momentum=0.9,
+        weight_decay=0.0
+    )
+    
+    # Cosine annealing LR
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=num_epochs
+    )
+    
+    # Training loop (NO data augmentation)
+    for epoch in range(num_epochs):
+        for images, labels in train_loader:
+            images = images.cuda()
+            labels = labels.cuda()
+            
+            # Extract features (frozen)
+            with torch.no_grad():
+                features = pretrained_model(images)[0]  # CLS token
+            
+            # Linear classification
+            logits = classifier(features)
+            loss = F.cross_entropy(logits, labels)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        
+        scheduler.step()
+    
+    # Evaluation
+    accuracy = evaluate(classifier, pretrained_model, test_loader)
+    return accuracy
+```
+
+**Benchmark Results (from paper):**
+
+| Dataset | Task | Phikon | Kaiko-B8 | Virchow* | RudolfV* | Prov-GigaPath | H-optimus-0 | Hibou-B | **Hibou-L** |
+|---------|------|--------|----------|----------|----------|---------------|-------------|---------|-------------|
+| **CRC-100K** | 9-class tissue type | 0.917 | 0.949 | 0.968 | **0.973** | 0.968 | 0.970 | 0.955 | **0.966** |
+| **PCAM** | Binary metastasis | 0.916 | 0.919 | 0.933 | 0.944 | 0.947 | 0.942 | 0.946 | **0.953** |
+| **MHIST** | Polyp subtype | 0.791 | 0.832 | 0.834 | 0.821 | 0.839 | **0.861** | 0.812 | **0.858** |
+| **MSI-CRC** | MSI status CRC | 0.750 | 0.786 | - | 0.755 | 0.771 | 0.767 | 0.779 | **0.793** |
+| **MSI-STAD** | MSI status gastric | 0.760 | 0.814 | - | 0.788 | 0.784 | 0.797 | 0.797 | **0.829** |
+| **TIL-DET** | TIL detection | 0.944 | **0.945** | - | 0.943 | 0.939 | **0.948** | 0.942 | **0.942** |
+| **AVG (1-3)** | Top 3 datasets | 0.875 | 0.900 | 0.912 | **0.913** | 0.918 | 0.924 | 0.904 | **0.926** |
+| **AVG (1-6)** | All 6 datasets | 0.846 | 0.874 | - | 0.871 | 0.875 | 0.881 | 0.872 | **0.890** |
+
+***Virchow and RudolfV results from respective papers (not open-sourced at time of Hibou publication)*
+
+**Key Observations:**
+
+```
+Hibou-L Performance:
+  ✅ #1 on AVG (1-3): 0.926 (beats all open-source models)
+  ✅ #1 on AVG (1-6): 0.890 (SOTA across all benchmarks)
+  ✅ #1 on PCAM: 0.953 (metastasis detection)
+  ✅ #1 on MSI-CRC: 0.793 (microsatellite instability)
+  ✅ #1 on MSI-STAD: 0.829 (gastric MSI)
+  
+Strong but not #1:
+  - CRC-100K: 0.966 (2nd after RudolfV 0.973)
+  - MHIST: 0.858 (2nd after H-optimus-0 0.861)
+  - TIL-DET: 0.942 (tied 3rd)
+
+Hibou-B vs. GigaPath:
+  - Hibou-B: 86M params, 0.872 avg
+  - GigaPath: 1,100M params, 0.875 avg
+  → Hibou-B achieves 99.7% of GigaPath performance
+    with 13× fewer parameters!
+
+Hibou-L vs. Hibou-B:
+  - Improvement: +1.8% absolute (0.890 vs. 0.872)
+  - Cost: 3.5× more parameters (300M vs. 86M)
+  - Worth it for peak performance
+```
+
+**Dataset Descriptions:**
+
+**1. CRC-100K (NCT-CRC-HE-100K-NONORM)**
+```yaml
+Description: Colorectal cancer tissue classification
+Images: 107,180 H&E patches (224×224, 20×)
+Classes: 9 tissue types
+  - Adipose (ADI)
+  - Background (BACK)
+  - Debris (DEB)
+  - Lymphocytes (LYM)
+  - Mucus (MUC)
+  - Smooth muscle (MUS)
+  - Normal colon mucosa (NORM)
+  - Cancer-associated stroma (STR)
+  - Colorectal adenocarcinoma epithelium (TUM)
+Source: Colorectal cancer slides
+Normalization: None (unnormalized version)
+Difficulty: Moderate (well-defined classes)
+```
+
+**2. PCAM (PatchCamelyon)**
+```yaml
+Description: Lymph node metastasis detection
+Images: 327,680 patches (96×96 upsampled to 224×224)
+Classes: 2 (metastasis present/absent)
+Source: Lymph node sections from breast cancer patients
+Task: Binary classification of metastatic tissue
+Difficulty: Hard (subtle morphology, class imbalance)
+Clinical relevance: Staging breast cancer
+```
+
+**3. MHIST (Minimalist Histopathology Image Analysis)**
+```yaml
+Description: Colorectal polyp subtype classification
+Images: 3,152 patches (224×224)
+Classes: 2
+  - Hyperplastic polyp (HP)
+  - Sessile serrated adenoma (SSA)
+Source: Colorectal polyp biopsies
+Difficulty: Very hard (subtle differences, expert-level task)
+Clinical relevance: Cancer risk stratification
+Why challenging: SSA and HP look very similar
+```
+
+**4. MSI-CRC (Microsatellite Instability - Colorectal)**
+```yaml
+Description: Predict MSI status from histology
+Images: 193,312 patches (224×224, 0.5 µm/px)
+Classes: 2
+  - MSS (microsatellite stable)
+  - MSIMUT (microsatellite instable/mutated)
+Source: TCGA colorectal cancer cohort
+Normalization: Macenko color normalization
+Clinical relevance: Immunotherapy response prediction
+  - MSI-high tumors respond better to checkpoint inhibitors
+```
+
+**5. MSI-STAD (Microsatellite Instability - Gastric)**
+```yaml
+Description: MSI prediction in gastric cancer
+Images: 218,578 patches (224×224, 0.5 µm/px)
+Classes: 2 (MSS vs. MSIMUT)
+Source: TCGA gastric cancer cohort
+Normalization: Macenko color normalization
+Difference from MSI-CRC: Different organ, different morphology
+```
+
+**6. TIL-DET (Tumor-Infiltrating Lymphocyte Detection)**
+```yaml
+Description: Detect presence of TILs in tumor regions
+Images: 304,097 patches (100×100, 0.5 µm/px)
+Classes: 2 (TIL present/absent)
+Source: TCGA pan-cancer (23 cancer types)
+Clinical relevance: Immune response biomarker
+  - High TILs → better prognosis, immunotherapy response
+Diversity: 23 different cancer types (pan-cancer)
+```
+
+---
+
+#### **Slide-Level Classification Benchmarks**
+
+**Evaluation Protocol: Weakly Supervised WSI Classification**
+
+```python
+def slide_level_evaluation(pretrained_model, dataset):
+    """
+    Weakly supervised whole-slide image classification
+    
+    Args:
+        pretrained_model: Frozen Hibou-L backbone
+        dataset: WSI dataset (e.g., TCGA-BRCA)
+    
+    Returns:
+        auc: Area under ROC curve
+    """
+    # Freeze feature extractor
+    pretrained_model.eval()
+    for param in pretrained_model.parameters():
+        param.requires_grad = False
+    
+    # Attention-based pooling (trainable)
+    pooling_model = AttentionMIL(
+        input_dim=1024,
+        hidden_dim=256,
+        num_classes=num_classes
+    ).cuda()
+    
+    # Optimizer
+    optimizer = torch.optim.AdamW(
+        pooling_model.parameters(),
+        lr=1e-4,
+        weight_decay=0.01
+    )
+    
+    # Training loop
+    for epoch in range(num_epochs):
+        for wsi, label in train_loader:
+            # Extract tiles from WSI (non-overlapping)
+            tiles = extract_tiles_from_wsi(wsi)  # (N, 3, 224, 224)
+            
+            # Extract features (frozen backbone)
+            with torch.no_grad():
+                features = []
+                for tile_batch in DataLoader(tiles, batch_size=256):
+                    tile_batch = tile_batch.cuda()
+                    feat = pretrained_model(tile_batch)[0]  # CLS tokens
+                    features.append(feat)
+                features = torch.cat(features, dim=0)  # (N, 1024)
+            
+            # Attention pooling + classification
+            logits = pooling_model(features)  # (num_classes,)
+            loss = F.cross_entropy(logits.unsqueeze(0), label.unsqueeze(0))
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    
+    # Evaluation
+    auc = evaluate_wsi_classification(pooling_model, pretrained_model, test_loader)
+    return auc
+
+class AttentionMIL(nn.Module):
+    """Attention-based Multiple Instance Learning"""
+    def __init__(self, input_dim=1024, hidden_dim=256, num_classes=2):
+        super().__init__()
+        
+        # Attention mechanism
+        self.attention = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+        # Classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+            nn.Linear(hidden_dim, num_classes)
+        )
+    
+    def forward(self, features):
+        # features: (N, 1024) tile features from WSI
+        
+        # Compute attention weights
+        attention_scores = self.attention(features)  # (N, 1)
+        attention_weights = torch.softmax(attention_scores, dim=0)  # (N, 1)
+        
+        # Weighted aggregation
+        wsi_embedding = (attention_weights * features).sum(dim=0)  # (1024,)
+        
+        # Classification
+        logits = self.classifier(wsi_embedding)  # (num_classes,)
+        
+        return logits
+```
+
+**Benchmark Results:**
+
+| Dataset | Task | Classes | Prov-GigaPath | Hibou-B | **Hibou-L** |
+|---------|------|---------|---------------|---------|-------------|
+| **BRCA** | Breast cancer subtype | 2 | 0.918 | 0.929 | **0.946** |
+| **NSCLC** | Lung cancer subtype | 2 | 0.967 | 0.952 | **0.969** |
+| **RCC** | Kidney cancer subtype | 3 | 0.987 | 0.993 | **0.996** |
+
+**Task Descriptions:**
+
+**1. BRCA (Breast Cancer Subtype)**
+```yaml
+Dataset: TCGA-BRCA
+Total WSIs: 963
+Classes: 2
+  - Infiltrating duct carcinoma (IDC): 767 WSIs
+  - Lobular carcinoma (LC): 196 WSIs
+Split: 80% train, 10% val, 10% test
+Metric: AUC (area under ROC curve)
+
+Task difficulty: Moderate
+  - IDC and LC have distinct morphology
+  - IDC: Glandular structures, desmoplastic stroma
+  - LC: Linear/single-file growth pattern
+
+Hibou-L performance: 0.946 AUC
+  - Best among tested models
+  - +2.8% vs. GigaPath (0.918)
+  - +1.7% vs. Hibou-B (0.929)
+```
+
+**2. NSCLC (Non-Small Cell Lung Cancer Subtype)**
+```yaml
+Dataset: TCGA-LUAD + TCGA-LUSC
+Total WSIs: 973
+Classes: 2
+  - Adenocarcinoma (LUAD): 453 WSIs
+  - Squamous cell carcinoma (LUSC): 520 WSIs
+Split: 80% train, 10% val, 10% test
+Metric: AUC
+
+Task difficulty: Moderate-Hard
+  - LUAD: Glandular architecture
+  - LUSC: Solid sheets, keratinization, intercellular bridges
+  - Some overlapping features
+
+Hibou-L performance: 0.969 AUC
+  - Best among tested models
+  - +0.2% vs. GigaPath (0.967)
+  - +1.7% vs. Hibou-B (0.952)
+  - Near-perfect discrimination
+```
+
+**3. RCC (Renal Cell Carcinoma Subtype)**
+```yaml
+Dataset: TCGA-KIRC + TCGA-KIRP + TCGA-KICH
+Total WSIs: 927
+Classes: 3
+  - Clear cell carcinoma (KIRC): 523 WSIs
+  - Papillary carcinoma (KIRP): 291 WSIs
+  - Chromophobe carcinoma (KICH): 113 WSIs
+Split: 80% train, 10% val, 10% test
+Metric: Multi-class AUC
+
+Task difficulty: Moderate
+  - Clear cell: Clear cytoplasm, vascular network
+  - Papillary: Papillary/tubular architecture
+  - Chromophobe: Large cells, prominent cell borders
+  - Well-differentiated morphology
+
+Hibou-L performance: 0.996 AUC
+  - Nearly perfect (99.6%)
+  - +0.9% vs. GigaPath (0.987)
+  - +0.3% vs. Hibou-B (0.993)
+  - Exceptional performance on 3-class task
+```
+
+**Key Insights:**
+
+```
+Slide-Level Performance:
+  ✅ Hibou-L achieves SOTA on all 3 tasks
+  ✅ 0.996 AUC on RCC (nearly perfect)
+  ✅ 0.969 AUC on NSCLC (excellent)
+  ✅ 0.946 AUC on BRCA (strong)
+
+Hibou-B Efficiency:
+  ✅ Hibou-B beats GigaPath on 2/3 tasks
+  ✅ 13× fewer parameters than GigaPath
+  ✅ BRCA: 0.929 vs. 0.918 (+1.1%)
+  ✅ RCC: 0.993 vs. 0.987 (+0.6%)
+  ⚖️ NSCLC: 0.952 vs. 0.967 (-1.5%)
+
+Comparison: Patch vs. Slide Performance
+  Patch benchmarks: Hibou-L leads by ~1-2%
+  Slide benchmarks: Hibou-L leads by ~1-3%
+  → Consistent superiority across granularities
+  → Strong patch features → strong slide features
+```
+
+---
+
+### **Model Deployment & Usage**
+
+#### **Loading Hibou-L from HuggingFace**
+
+```python
+# === Method 1: HuggingFace Transformers (Recommended) ===
+
+from transformers import AutoImageProcessor, AutoModel
+import torch
+from PIL import Image
+
+# Load processor and model
+processor = AutoImageProcessor.from_pretrained(
+    "histai/hibou-L",
+    trust_remote_code=True  # Required for registers
+)
+
+model = AutoModel.from_pretrained(
+    "histai/hibou-L",
+    trust_remote_code=True
+).cuda()
+
+model.eval()
+
+# Process image
+image = Image.open("tile.png")  # 224×224 RGB
+inputs = processor(images=image, return_tensors="pt")
+inputs = {k: v.cuda() for k, v in inputs.items()}
+
+# Extract features
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# Outputs structure
+cls_token = outputs.last_hidden_state[:, 0]       # (1, 1024) global
+patch_tokens = outputs.last_hidden_state[:, 5:]   # (1, 256, 1024) local
+# Register tokens [:, 1:5] typically discarded
+
+print(f"CLS embedding shape: {cls_token.shape}")
+print(f"Patch embeddings shape: {patch_tokens.shape}")
+
+# === Method 2: Direct from GitHub (Alternative) ===
+
+# Clone repository
+!git clone https://github.com/HistAI/hibou.git
+!cd hibou && pip install -r requirements.txt && pip install -e .
+
+# Download weights
+# Hibou-L: https://huggingface.co/histai/hibou-L
+# (Requires agreeing to terms on HuggingFace)
+
+from hibou import build_model
+
+model = build_model("path/to/hibou_l_weights.pth").cuda()
+model.eval()
+
+# === Method 3: Load Hibou-B (Smaller, Faster) ===
+
+# Hibou-B: 86M parameters vs. Hibou-L 300M
+# Performance: ~98% of Hibou-L, 3× faster inference
+
+processor_b = AutoImageProcessor.from_pretrained(
+    "histai/hibou-b",
+    trust_remote_code=True
+)
+
+model_b = AutoModel.from_pretrained(
+    "histai/hibou-b",
+    trust_remote_code=True
+).cuda()
+
+# Same usage as Hibou-L
+# Output: (1, 768) for CLS, (1, 256, 768) for patches
+```
+
+#### **Batch Processing & WSI Feature Extraction**
+
+```python
+def extract_wsi_features_hibou(wsi_path, model, processor, batch_size=128):
+    """
+    Extract Hibou-L features from whole-slide image
+    
+    Args:
+        wsi_path: Path to .svs file
+        model: Pretrained Hibou-L model
+        processor: HuggingFace image processor
+        batch_size: Batch size for feature extraction
+    
+    Returns:
+        features: (N, 1024) CLS token features per tile
+        coords: (N, 2) tile coordinates
+    """
+    import openslide
+    
+    # Load WSI
+    slide = openslide.OpenSlide(wsi_path)
+    
+    # Extract tiles (non-overlapping, 20×)
+    tiles, coords = extract_tiles_from_wsi(
+        slide,
+        tile_size=224,
+        magnification=20,
+        overlap=0,
+        background_threshold=0.9  # Keep tiles with >90% tissue
+    )
+    
+    # Process in batches
+    features = []
+    
+    for i in range(0, len(tiles), batch_size):
+        batch_tiles = tiles[i:i+batch_size]
+        
+        # Preprocess
+        inputs = processor(images=batch_tiles, return_tensors="pt")
+        inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        # Extract features
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():  # Mixed precision
+                outputs = model(**inputs)
+                batch_features = outputs.last_hidden_state[:, 0]  # CLS tokens
+        
+        features.append(batch_features.cpu().half())  # Save as fp16
+    
+    features = torch.cat(features, dim=0)  # (N, 1024)
+    
+    return features, coords
+
+# Example usage
+wsi_features, tile_coords = extract_wsi_features_hibou(
+    wsi_path="TCGA-XX-XXXX.svs",
+    model=model,
+    processor=processor,
+    batch_size=128
+)
+
+print(f"Extracted {len(wsi_features)} tiles")
+print(f"Feature shape: {wsi_features.shape}")
+print(f"Memory usage: {wsi_features.element_size() * wsi_features.nelement() / 1e6:.1f} MB")
+
+# Inference speed on V100
+# Hibou-L: ~100 tiles/sec (batch 128, fp16)
+# Hibou-B: ~300 tiles/sec (batch 128, fp16)
+# Typical WSI: 5,000-15,000 tiles
+# Processing time: 50-150 seconds per WSI (Hibou-L)
+```
+
+#### **Fine-Tuning for Downstream Tasks**
+
+**Example 1: Patch Classification**
+
+```python
+class HibouClassifier(nn.Module):
+    """
+    Fine-tune Hibou-L for patch classification
+    """
+    def __init__(self, hibou_model, num_classes=9, freeze_backbone=True):
+        super().__init__()
+        
+        self.backbone = hibou_model
+        
+        # Freeze backbone (typical for limited data)
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+        # Task-specific head
+        self.classifier = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes)
+        )
+    
+    def forward(self, x):
+        # Extract features
+        if hasattr(self.backbone, 'last_hidden_state'):
+            # HuggingFace model
+            outputs = self.backbone(x)
+            features = outputs.last_hidden_state[:, 0]
+        else:
+            # Direct model
+            features = self.backbone(x)[0]
+        
+        # Classification
+        logits = self.classifier(features)
+        return logits
+
+# Fine-tuning
+model_ft = HibouClassifier(model, num_classes=9).cuda()
+
+optimizer = torch.optim.AdamW(
+    model_ft.classifier.parameters(),  # Only train classifier
+    lr=1e-4,
+    weight_decay=0.01
+)
+
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=20  # 20 epochs typical
+)
+
+# Training loop
+for epoch in range(20):
+    for images, labels in train_loader:
+        images = images.cuda()
+        labels = labels.cuda()
+        
+        logits = model_ft(images)
+        loss = F.cross_entropy(logits, labels)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    
+    scheduler.step()
+```
+
+**Example 2: WSI Classification (MIL)**
+
+```python
+class HibouMIL(nn.Module):
+    """
+    Multiple Instance Learning with Hibou-L
+    """
+    def __init__(self, hibou_model, num_classes=2):
+        super().__init__()
+        
+        # Frozen feature extractor
+        self.feature_extractor = hibou_model
+        for param in self.feature_extractor.parameters():
+            param.requires_grad = False
+        
+        # Attention pooling
+        self.attention = nn.Sequential(
+            nn.Linear(1024, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1)
+        )
+        
+        # Classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(1024, 256),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+            nn.Linear(256, num_classes)
+        )
+    
+    def forward(self, tiles):
+        """
+        Args:
+            tiles: (N, 3, 224, 224) tiles from single WSI
+        
+        Returns:
+            logits: (num_classes,) slide-level prediction
+        """
+        # Extract features (batched)
+        with torch.no_grad():
+            features = []
+            for i in range(0, len(tiles), 256):  # Batch 256
+                batch = tiles[i:i+256]
+                outputs = self.feature_extractor(batch)
+                features.append(outputs.last_hidden_state[:, 0])
+            features = torch.cat(features, dim=0)  # (N, 1024)
+        
+        # Attention weights
+        attention_scores = self.attention(features)  # (N, 1)
+        attention_weights = torch.softmax(attention_scores, dim=0)
+        
+        # Weighted aggregation
+        wsi_embedding = (attention_weights * features).sum(dim=0)  # (1024,)
+        
+        # Classification
+        logits = self.classifier(wsi_embedding)  # (num_classes,)
+        
+        return logits
+
+# Usage
+mil_model = HibouMIL(model, num_classes=2).cuda()
+
+optimizer = torch.optim.AdamW(
+    mil_model.parameters(),
+    lr=1e-4,
+    weight_decay=0.01
+)
+
+# Training (one WSI per batch)
+for wsi_tiles, label in train_loader:
+    wsi_tiles = wsi_tiles.cuda()  # (N, 3, 224, 224)
+    label = label.cuda()
+    
+    logits = mil_model(wsi_tiles)
+    loss = F.cross_entropy(logits.unsqueeze(0), label.unsqueeze(0))
+    
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
+---
+
+### **Comparison with Other Foundation Models**
+
+#### **Detailed Model Comparison**
+
+| Feature | Hibou-L | Hibou-B | UNI | GigaPath | Virchow2 | H0-mini | CHIEF |
+|---------|---------|---------|-----|----------|----------|---------|-------|
+| **Architecture** | ViT-L/14 | ViT-B/14 | ViT-L/16 | ViT-g/14 | ViT-H/14 | ViT-B/14 | CTransPath + Attention |
+| **Parameters** | 300M | 86M | 304M | 1,100M | 632M | 86M | 28M (tile) |
+| **Registers** | ✅ 4 | ✅ 4 | ❌ | ✅ 4 | ✅ 4 | ❌ | ❌ |
+| **Framework** | DINOv2 | DINOv2 | DINOv2 | DINOv2 + MAE | DINOv2 | Distillation | MoCo + MIL |
+| **Pretraining** | Self-supervised | Self-supervised | Self-supervised | Hybrid | Self-supervised | Knowledge distillation | 2-stage (tile + WSI) |
+| **WSIs** | 1.1M | 1.1M | 100K | 171K | 3.1M | 6K | 60K |
+| **Patches** | 1.2B | 512M | 100M | 1.3B | Not specified | 43M | 15M (tile pretrain) |
+| **Stain diversity** | ✅ H&E + non-H&E | ✅ H&E + non-H&E | H&E only | H&E only | H&E only | H&E only | H&E only |
+| **Species** | Human + vet | Human + vet | Human | Human | Human | Human | Human |
+| **Cytology** | ✅ Yes | ✅ Yes | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Magnification** | 20× | 20× | 20× | 20× | 5×/10×/20×/40× | 20× | 10× |
+| **Patch size** | 14×14 | 14×14 | 16×16 | 14×14 | 14×14 | 14×14 | 256×256 |
+| **Image size** | 224×224 | 224×224 | 224×224 | 224×224 | 224×224 | 224×224 | 256×256 |
+| **Embedding dim** | 1,024 | 768 | 1,024 | 1,536 | 1,280 | 768 | 768 |
+| **Open source** | ✅ Apache 2.0 | ✅ Apache 2.0 | ✅ CC BY-NC-ND 4.0 | ✅ Apache 2.0 | ✅ CC BY-NC 4.0 | ✅ CC BY-NC-ND 4.0 | ✅ Docker + GitHub |
+| **Patch avg (1-6)** | **0.890** | 0.872 | Not tested | 0.875 | Not tested | Not tested | Not tested |
+| **BRCA subtype** | **0.946** | 0.929 | Not tested | 0.918 | Not tested | Not tested | Not tested |
+| **NSCLC subtype** | **0.969** | 0.952 | Not tested | 0.967 | Not tested | Not tested | Not tested |
+| **RCC subtype** | **0.996** | 0.993 | Not tested | 0.987 | Not tested | Not tested | Not tested |
+
+#### **When to Use Hibou-L**
+
+**✅ Use Hibou-L when:**
+
+```
+Peak Performance Required:
+  - Research benchmarking
+  - Clinical validation studies
+  - High-stakes diagnostic tasks
+  - Publication-quality results
+
+Diverse Tissue/Stain Types:
+  - Multi-organ studies
+  - Non-H&E stains (IHC, special stains)
+  - Veterinary pathology
+  - Cytology applications
+
+Slide-Level Tasks:
+  - WSI classification (SOTA on BRCA, NSCLC, RCC)
+  - Tumor subtyping
+  - Prognostic prediction
+
+Resources Available:
+  - 16GB+ GPU (V100, A100, RTX 4090)
+  - Acceptable inference time (~100 tiles/sec)
+  - Budget for compute
+```
+
+**❌ Do NOT use Hibou-L when:**
+
+```
+Efficiency Critical:
+  - Real-time inference needed
+  - Consumer GPUs (<16GB)
+  - High-throughput screening (>10K WSIs/day)
+  → Use Hibou-B instead (3× faster, 99% performance)
+
+Multi-Magnification Required:
+  - Tasks need 5×, 10×, 20×, 40× together
+  → Use Virchow2 (trained on 4 magnifications)
+
+Slide-Level Context Critical:
+  - Spatial relationships across entire slide
+  - Tumor microenvironment modeling
+  → Use GigaPath (slide-level encoder)
+
+Vision-Language Tasks:
+  - Natural language queries on slides
+  - Zero-shot classification
+  - Report generation
+  → Use CONCH, PLIP (multimodal models)
+```
+
+#### **Hibou-B vs. Hibou-L Trade-offs**
+
+```
+Hibou-B (86M):
+  ✅ 3× faster inference (~300 tiles/sec)
+  ✅ Smaller memory footprint (~4GB vs. ~12GB)
+  ✅ 99% of Hibou-L performance (0.872 vs. 0.890)
+  ✅ Runs on consumer GPUs (RTX 3090, 4070 Ti)
+  ⚖️ Slightly lower peak accuracy
+  
+Hibou-L (300M):
+  ✅ SOTA performance (0.890 avg, best on slide tasks)
+  ✅ Better on complex/ambiguous cases
+  ✅ Richer 1,024-D features (vs. 768-D)
+  ⚖️ 3× slower inference
+  ⚖️ Requires 16GB+ GPU
+  ⚖️ Higher memory/compute cost
+
+Recommendation:
+  - Development/testing → Hibou-B
+  - Production (high-volume) → Hibou-B
+  - Research/benchmarking → Hibou-L
+  - Clinical deployment → Depends on constraints
+```
+
+---
+
+### **Limitations & Future Directions**
+
+#### **Current Limitations**
+
+**1. Single Magnification (20× only)**
+
+```
+Issue: Trained exclusively on 20× magnification
+Impact:
+  - Cannot leverage multi-scale information
+  - May miss fine details visible at 40×
+  - May miss context visible at 5×/10×
+  
+Workaround:
+  - Extract tiles at 20× only
+  - For 40× data, downsample to 20×
+  - For 5×/10× data, upsample to 20× (not ideal)
+  
+Future: Multi-magnification Hibou
+  - Train on 5×/10×/20×/40× tiles
+  - Hierarchical feature fusion
+  - Following Virchow2 approach
+```
+
+**2. Proprietary Dataset (Not Public)**
+
+```
+Issue: 1.1M WSI dataset not released publicly
+Impact:
+  - Cannot reproduce pretraining exactly
+  - Cannot fine-tune on same data distribution
+  - Limits community research
+  
+Contrast:
+  - UNI: Mass-100K public
+  - GigaPath: TCGA + some public data
+  - Virchow2: Paige dataset (proprietary but larger)
+  
+Note: Model weights ARE public (Apache 2.0)
+  - Can use pretrained model freely
+  - Just can't reproduce pretraining
+```
+
+**3. Limited Benchmark Coverage**
+
+```
+Tested benchmarks: 6 patch + 3 slide tasks
+Missing benchmarks:
+  - Segmentation (nuclei, tissue, tumor)
+  - Detection (metastasis, mitosis)
+  - Spatial transcriptomics (HEST)
+  - Survival prediction
+  - Mutation prediction (TP53, KRAS, etc.)
+  
+Future work: Broader evaluation
+  - Paper mentions plans for segmentation benchmarks
+  - Compare with UNI, Virchow2 on more tasks
+```
+
+**4. No Slide-Level Pretraining**
+
+```
+Current: Tile-level features only
+  - Each 224×224 patch processed independently
+  - No explicit modeling of spatial relationships
+  
+Limitation:
+  - Tumor microenvironment requires global context
+  - WSI classification relies on MIL (post-hoc aggregation)
+  
+Future direction (mentioned in paper):
+  - Slide-level pretraining (like GigaPath's LongNet)
+  - Learn spatial relationships during pretraining
+  - Potential +2-5% on slide-level tasks
+```
+
+**5. H&E Bias Despite Diversity**
+
+```
+Dataset: 82% H&E, 18% non-H&E
+  - Still heavily H&E-dominated
+  - Non-H&E underrepresented
+  
+Impact:
+  - May perform better on H&E than IHC/special stains
+  - Stain-specific features may not be optimal
+  
+Mitigation:
+  - RandStainNA helps with stain robustness
+  - Diverse non-H&E still better than 100% H&E models
+  
+Future: Balanced stain distribution
+  - Equal representation of H&E, IHC, special stains
+  - Stain-agnostic feature learning
+```
+
+#### **Future Improvements (Paper Roadmap)**
+
+**1. Extended Evaluation Benchmarks**
+
+```python
+# Planned evaluations (mentioned in paper)
+
+# Segmentation tasks
+tasks_segmentation = [
+    "Nuclei segmentation (PanNuke)",
+    "Tissue segmentation (BCSS)",
+    "Tumor segmentation (CAMELYON16)",
+    "Cell segmentation (MoNuSeg)"
+]
+
+# Additional subtyping
+tasks_subtyping = [
+    "TCGA pan-cancer (32 cancer types)",
+    "More organ-specific subtypes",
+    "Histologic grade prediction"
+]
+
+# Molecular predictions
+tasks_molecular = [
+    "TP53 mutation",
+    "KRAS mutation",
+    "HER2 status",
+    "ER/PR status (breast)"
+]
+```
+
+**2. Slide-Level Pretraining**
+
+```
+Approach: Follow GigaPath's LongNet
+  - Pretrain slide encoder on top of tile encoder
+  - Learn global spatial context
+  - Long-range dependencies across WSI
+  
+Architecture:
+  Hibou-L (tile encoder, frozen)
+     ↓
+  Extract features for all tiles in WSI
+     ↓
+  LongNet / Transformer (slide encoder, trainable)
+     ↓
+  Slide-level representation
+  
+Benefits:
+  - Better WSI classification (+2-5% estimated)
+  - Spatial pattern recognition
+  - Tumor microenvironment understanding
+  
+Challenge:
+  - Computational cost (10K+ tiles per WSI)
+  - Memory requirements (efficient attention needed)
+```
+
+**3. Vision-Language Foundation Model**
+
+```
+Vision-Language Model (VLM) using Hibou
+  
+Architecture:
+  Hibou-L (vision encoder)
+     +
+  LLM (language decoder, e.g., LLaMA, Mistral)
+     ↓
+  Multimodal pathology model
+  
+Capabilities:
+  - "Describe this tissue sample"
+  - "Is there tumor in this slide?"
+  - "What's the diagnosis for this WSI?"
+  - "Explain the difference between these two subtypes"
+  
+Training:
+  - Pathology reports as supervision
+  - Image-text pairs from medical literature
+  - Instruction tuning for pathology tasks
+  
+Use cases:
+  - AI pathology assistant
+  - Report generation
+  - Educational tool for trainees
+  - Zero-shot classification via language
+  
+Example:
+  User: "Describe the histologic features"
+  VLM: "This H&E-stained tissue shows glandular 
+        structures with nuclear atypia and desmoplastic 
+        stroma, consistent with adenocarcinoma."
+```
+
+**4. Multi-Magnification Support**
+
+```python
+# Future: Hierarchical multi-mag model
+
+class HibouMultiMag(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        # Separate encoders per magnification
+        self.encoder_5x = HibouL_5x()
+        self.encoder_10x = HibouL_10x()
+        self.encoder_20x = HibouL_20x()  # Current Hibou-L
+        self.encoder_40x = HibouL_40x()
+        
+        # Hierarchical fusion
+        self.fusion = HierarchicalFusion(
+            dims=[1024, 1024, 1024, 1024]
+        )
+    
+    def forward(self, image_pyramid):
+        # Extract features at each magnification
+        feat_5x = self.encoder_5x(image_pyramid['5x'])
+        feat_10x = self.encoder_10x(image_pyramid['10x'])
+        feat_20x = self.encoder_20x(image_pyramid['20x'])
+        feat_40x = self.encoder_40x(image_pyramid['40x'])
+        
+        # Hierarchical fusion
+        fused = self.fusion([feat_5x, feat_10x, feat_20x, feat_40x])
+        
+        return fused
+
+# Benefits
+# - 5×: Global tissue architecture
+# - 10×: Tissue organization
+# - 20×: Cellular morphology (current Hibou-L)
+# - 40×: Nuclear details
+# → Rich multi-scale representation
+```
+
+**5. Improved Efficiency (Hibou-S?)**
+
+```
+Potential Hibou-S (Small) model:
+  Architecture: ViT-S/14
+  Parameters: ~22M (vs. 86M Hibou-B, 300M Hibou-L)
+  Target: Edge deployment, mobile devices
+  
+  Training strategy:
+    - Knowledge distillation from Hibou-L
+    - Similar to H0-mini approach
+    - Maintain 95%+ performance at 7× smaller size
+  
+  Use cases:
+    - Point-of-care diagnostics
+    - Resource-limited settings
+    - Real-time inference (<10ms/tile)
+    - Consumer hardware (CPU inference)
+```
+
+---
+
+### **Implementation & Availability**
+
+#### **Official Resources**
+
+**HuggingFace Hub:**
+```
+Hibou-L: https://huggingface.co/histai/hibou-L
+Hibou-B: https://huggingface.co/histai/hibou-b
+CellViT-Hibou: https://huggingface.co/histai/cellvit-hibou-l
+  (Segmentation model, CC BY-NC-SA 4.0)
+
+Collection: https://huggingface.co/collections/histai/hibou-foundation-models
+```
+
+**GitHub Repository:**
+```
+Repository: https://github.com/HistAI/hibou
+  - Installation instructions
+  - Example notebooks (example.ipynb, segmentation_example.ipynb)
+  - Model code
+  - Evaluation scripts
+
+Features:
+  - Apache 2.0 license (permissive, commercial use OK)
+  - Clean codebase
+  - HuggingFace integration
+  - Google Drive weights (Hibou-B)
+```
+
+**Paper:**
+```
+Title: "Hibou: A Family of Foundational Vision Transformers for Pathology"
+Authors: Nechaev, Pchelnikov, Ivanova (HistAI)
+arXiv: 2406.05074
+Published: June 7, 2024
+Link: https://arxiv.org/abs/2406.05074
+```
+
+#### **System Requirements**
+
+```yaml
+Minimum (Inference - Hibou-B):
+  GPU: NVIDIA with 8GB+ VRAM (RTX 3070, RTX 4060 Ti, Tesla T4)
+  RAM: 16GB system memory
+  Storage: 5GB (model + examples)
+  CUDA: 11.0+
+  PyTorch: 1.12+
+
+Recommended (Inference - Hibou-L):
+  GPU: NVIDIA with 16GB+ VRAM (V100, A100, RTX 4090, RTX 6000 Ada)
+  RAM: 32GB system memory
+  Storage: 10GB
+  CUDA: 11.7+
+  PyTorch: 2.0+
+
+Training/Fine-tuning (Hibou-L):
+  GPU: 1-8× NVIDIA A100 40GB/80GB
+  RAM: 64-128GB
+  Storage: 100GB+ (datasets + checkpoints)
+  CUDA: 11.7+
+  PyTorch: 2.0+
+
+Dependencies:
+  - Python 3.8+
+  - PyTorch with CUDA
+  - Transformers (HuggingFace)
+  - OpenSlide (WSI reading)
+  - Pillow, NumPy, SciPy
+  - timm (PyTorch Image Models)
+```
+
+#### **Installation**
+
+```bash
+# === Method 1: HuggingFace Only (Simplest) ===
+
+pip install torch torchvision transformers pillow
+
+# Ready to use! No additional installation needed
+
+# === Method 2: Full Installation from GitHub ===
+
+# Clone repository
+git clone https://github.com/HistAI/hibou.git
+cd hibou
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install package
+pip install -e .
+
+# Download weights (Hibou-B from Google Drive)
+# Follow instructions in README
+
+# === Method 3: Docker (Coming Soon?) ===
+# Not currently available, but standard practice for pathology models
+```
+
+---
+
+### **Summary of Key Contributions**
+
+**1. Maximum Dataset Diversity**
+- 1.1M WSIs: 2nd largest (after Virchow2's 3.1M)
+- **Most diverse**: H&E + non-H&E + veterinary + cytology
+- 306K unique cases across species and slide types
+
+**2. State-of-the-Art Performance**
+- **#1 on patch benchmarks**: 0.890 avg (6 datasets)
+- **#1 on slide benchmarks**: 0.946 BRCA, 0.969 NSCLC, 0.996 RCC
+- Beats all open-source models tested
+- Competitive with closed-source (Virchow, RudolfV)
+
+**3. Efficient Smaller Variant (Hibou-B)**
+- 86M parameters (vs. 300M Hibou-L)
+- Beats GigaPath (1.1B params) on 2/3 slide tasks
+- 99% of Hibou-L performance at 30% size
+- 3× faster inference
+
+**4. DINOv2 + Registers**
+- State-of-the-art self-supervised framework
+- Vision transformer registers for cleaner features
+- Pathology-specific augmentations (RandStainNA, rotation)
+
+**5. Open Science**
+- Apache 2.0 license (commercial use allowed)
+- HuggingFace integration (easy deployment)
+- GitHub code + notebooks
+- Active development (CellViT-Hibou released Aug 2024)
+
+**6. Future Roadmap**
+- Slide-level pretraining planned
+- Vision-language model development
+- Extended benchmark evaluation
+- Multi-magnification support
+
+---
+
+### **Citation**
+
+**When citing Hibou in papers:**
+
+```bibtex
+@misc{nechaev2024hibou,
+    title={Hibou: A Family of Foundational Vision Transformers for Pathology},
+    author={Dmitry Nechaev and Alexey Pchelnikov and Ekaterina Ivanova},
+    year={2024},
+    eprint={2406.05074},
+    archivePrefix={arXiv},
+    primaryClass={eess.IV},
+    url={https://arxiv.org/abs/2406.05074}
+}
+```
+
+**When mentioning in text:**
+- "We extracted features using Hibou-L (Nechaev et al., 2024), a vision transformer pretrained on 1.1 million diverse pathology slides"
+- "Hibou-L achieves state-of-the-art performance on patch-level benchmarks (0.890 average accuracy) and slide-level classification tasks"
+- "For efficient deployment, we used Hibou-B (86M parameters), which provides 99% of Hibou-L's performance at 3× faster inference speed"
+
+---
+
+**Use Version 1** for Methods section in papers  
+**Use Version 2** as supplementary material or technical documentation
+
+---
+
+## Model Availability
+
+- **Hibou-L**: [HuggingFace](https://huggingface.co/histai/hibou-L) | [GitHub](https://github.com/HistAI/hibou)
+- **Hibou-B**: [HuggingFace](https://huggingface.co/histai/hibou-b)
+- **License**: Apache 2.0 (commercial use allowed)
+- **Contact**: dmitry@hist.ai (HistAI)
