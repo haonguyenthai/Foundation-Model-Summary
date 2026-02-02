@@ -1,0 +1,1458 @@
+
+## ResNet: Revolutionary Deep Residual Learning Framework
+
+### **Historical Context & Motivation**
+
+**The Deep Learning Paradox (Pre-2015):**
+
+```
+Common assumption: Deeper networks = Better performance
+Reality observed: Deeper plain networks = Worse performance
+
+Experiment (Figure 1 in paper):
+  20-layer plain network: 
+    - Training error: ~8%
+    - Test error: ~9%
+  
+  56-layer plain network:
+    - Training error: ~12% (HIGHER!)
+    - Test error: ~13% (WORSE!)
+
+Counterintuitive result:
+  - 56-layer network has MORE capacity
+  - 56-layer solution space CONTAINS 18-layer solution
+  - Yet 56-layer performs WORSE even on training data
+  
+Conclusion: Not overfitting, but OPTIMIZATION difficulty
+```
+
+**The Degradation Problem:**
+
+```
+Theoretical argument:
+  Consider shallow network S and deeper network D
+  D = S + extra layers
+
+  Theoretical solution exists:
+    Extra layers = identity mapping (output = input)
+    Other layers = copy from S
+    → D should achieve AT LEAST same performance as S
+  
+  Observed reality:
+    D performs WORSE than S
+    Current optimizers cannot find this solution
+  
+  Problem name: "Degradation"
+    - Accuracy saturates then degrades with depth
+    - NOT caused by overfitting (training error also higher)
+    - Fundamental optimization challenge
+```
+
+**Why Existing Solutions Were Insufficient:**
+
+```
+Previous concerns:
+  1. Vanishing/exploding gradients
+     - Addressed by: Normalized initialization, Batch Normalization
+     - Networks with 10-20 layers now trainable
+  
+  2. Overfitting with depth
+     - Not the issue here (training error increases!)
+  
+New problem: Degradation
+  - Even with good initialization + BN
+  - Even without overfitting
+  - Deeper networks harder to optimize
+  - Solvers struggle to approximate identity mappings
+```
+
+---
+
+### **Core Innovation: Residual Learning**
+
+#### **Mathematical Formulation**
+
+**Traditional Learning (Plain Networks):**
+
+```
+Goal: Learn desired mapping H(x)
+  x → [Conv layers] → H(x)
+
+Approach: Direct function approximation
+  - Stack multiple nonlinear layers
+  - Hope they approximate H(x)
+  
+Problem: Difficult when H(x) ≈ identity
+  - If optimal H(x) = x (identity mapping)
+  - Stack of nonlinear layers struggles to approximate x
+  - Requires perfect cancellation of transformations
+```
+
+**Residual Learning (ResNets):**
+
+```
+Reformulation: Learn residual function F(x)
+  F(x) = H(x) - x
+  
+Therefore: H(x) = F(x) + x
+
+Implementation:
+  x → [Conv layers compute F(x)] → F(x)
+  x ──────────────────────────────→ x  (identity shortcut)
+                                     ↓
+                                  F(x) + x = H(x)
+
+Key insight:
+  If optimal H(x) = x (identity):
+    - Residual learning: push F(x) → 0 (easy!)
+    - Plain learning: approximate x with nonlinear layers (hard!)
+  
+  If optimal H(x) ≈ x + small perturbation:
+    - Residual learning: learn small F(x) (easy!)
+    - Plain learning: learn entire H(x) (harder!)
+```
+
+**Hypothesis:**
+
+```
+"It is easier to optimize the residual mapping 
+ than to optimize the original, unreferenced mapping"
+
+Evidence from paper:
+  - Residual functions F(x) have small responses (Figure 7)
+  - Layer responses std ≈ 0.1-1.0 for ResNets
+  - Layer responses std ≈ 1.0-3.0 for plain nets
+  → ResNet layers make smaller modifications
+  → Confirms residuals closer to zero
+```
+
+#### **Implementation: Shortcut Connections**
+
+**Basic Building Block:**
+
+```python
+class BasicBlock(nn.Module):
+    """
+    Basic residual building block for ResNet-18/34
+    Two 3×3 conv layers with shortcut
+    """
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        
+        # Main path (F(x))
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 
+                               kernel_size=3, stride=stride, 
+                               padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, stride=1,
+                               padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        # Shortcut path (identity or projection)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            # Projection shortcut for dimension matching
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+    
+    def forward(self, x):
+        # Save identity for shortcut
+        identity = x
+        
+        # Main path: F(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        # Shortcut path: x or Ws*x
+        identity = self.shortcut(identity)
+        
+        # Element-wise addition: F(x) + x
+        out += identity
+        
+        # Final ReLU after addition
+        out = self.relu(out)
+        
+        return out
+
+# Mathematical formulation:
+# y = F(x, {Wi}) + x
+# where:
+#   x = input
+#   F(x, {Wi}) = W2 * σ(W1 * x)  for basic block
+#   σ = ReLU activation
+#   Wi = weights of layer i
+#   y = output
+```
+
+**Key Properties of Shortcut Connections:**
+
+```
+1. Identity Shortcuts (most common):
+   - y = F(x) + x
+   - NO extra parameters
+   - NO extra computation (just addition)
+   - Used when input/output dimensions match
+
+2. Projection Shortcuts (when needed):
+   - y = F(x) + Ws*x
+   - Ws = 1×1 convolution for dimension matching
+   - Used when:
+     a) Spatial dimensions change (stride=2)
+     b) Channel dimensions change
+   - Minimal extra parameters
+
+3. Element-wise Addition:
+   - Performed channel-by-channel
+   - Both F(x) and x must have same dimensions
+   - Fast operation (negligible cost)
+
+4. Why Identity Shortcuts Work:
+   - No parameters → no optimization burden
+   - Direct gradient path → ease backpropagation
+   - Enable very deep networks (152+ layers)
+```
+
+---
+
+### **Architecture Designs**
+
+#### **ResNet Variants: Building Block Comparison**
+
+**1. Basic Block (ResNet-18, ResNet-34)**
+
+```
+Structure:
+  Input (H×W×C)
+      ↓
+  3×3 conv, C filters, stride s ────→ F(x)
+      ↓ (BN + ReLU)
+  3×3 conv, C filters, stride 1
+      ↓ (BN)
+  ──→ F(x)
+  
+  Input ──────────────────────────→ x (identity shortcut)
+  
+  F(x) + x
+      ↓ (ReLU)
+  Output (H/s × W/s × C)
+
+Parameters per block:
+  - Conv1: 3×3×C×C = 9C²
+  - Conv2: 3×3×C×C = 9C²
+  - Total: 18C² (+ projection if needed)
+
+Complexity:
+  - FLOPs: 2 × (9C² × H × W) = 18C²HW
+  - Memory: 2 × (H×W×C) activations
+```
+
+**2. Bottleneck Block (ResNet-50/101/152)**
+
+```
+Structure:
+  Input (H×W×256)
+      ↓
+  1×1 conv, 64 filters ──────────┐
+      ↓ (BN + ReLU)              │
+  3×3 conv, 64 filters           │ F(x)
+      ↓ (BN + ReLU)              │
+  1×1 conv, 256 filters ─────────┘
+      ↓ (BN)
+  
+  Input ─────────────────────────→ x (identity shortcut)
+  
+  F(x) + x
+      ↓ (ReLU)
+  Output (H×W×256)
+
+Purpose: Reduce computational cost
+  - 1×1 conv reduces dimensions (256 → 64)
+  - 3×3 conv operates on smaller "bottleneck" (64)
+  - 1×1 conv restores dimensions (64 → 256)
+
+Parameters per block:
+  - Conv1 (1×1): 1×1×256×64 = 16,384
+  - Conv2 (3×3): 3×3×64×64 = 36,864
+  - Conv3 (1×1): 1×1×64×256 = 16,384
+  - Total: 69,632 params
+  
+  vs. Basic block at same depth:
+    - Two 3×3 with 256 filters: 2×(9×256²) = 1,179,648
+    - Bottleneck is 17× more parameter efficient!
+
+Complexity:
+  - FLOPs reduced by ~2× vs. basic block
+  - Enables deeper networks with same compute budget
+```
+
+**Why Bottleneck Design?**
+
+```
+Goal: Make 50+layer networks tractable
+
+Without bottleneck:
+  ResNet-50 with basic blocks:
+    - 50 layers × 3×3×256² params ≈ 100M params
+    - 50 layers × compute ≈ 20B FLOPs
+    - Training time: ~weeks
+
+With bottleneck:
+  ResNet-50 with bottleneck:
+    - 50 layers × reduced params ≈ 25M params
+    - 50 layers × reduced compute ≈ 4B FLOPs
+    - Training time: ~days
+
+Trade-off:
+  ✅ 4-5× fewer parameters
+  ✅ 3-4× less computation
+  ✅ Enables training 100+ layer networks
+  ⚖️ Slight accuracy drop vs. basic blocks at same depth
+  → But overall better due to ability to go much deeper
+```
+
+#### **ResNet Architecture Specifications**
+
+**Complete Architecture Table (from paper Table 1):**
+
+| Layer Name | Output Size | ResNet-18 | ResNet-34 | ResNet-50 | ResNet-101 | ResNet-152 |
+|------------|-------------|-----------|-----------|-----------|------------|------------|
+| **conv1** | 112×112 | 7×7, 64, stride 2 | 7×7, 64, stride 2 | 7×7, 64, stride 2 | 7×7, 64, stride 2 | 7×7, 64, stride 2 |
+| | | 3×3 max pool, stride 2 | 3×3 max pool, stride 2 | 3×3 max pool, stride 2 | 3×3 max pool, stride 2 | 3×3 max pool, stride 2 |
+| **conv2_x** | 56×56 | [3×3, 64]<br>[3×3, 64] ×2 | [3×3, 64]<br>[3×3, 64] ×3 | [1×1, 64]<br>[3×3, 64]<br>[1×1, 256] ×3 | [1×1, 64]<br>[3×3, 64]<br>[1×1, 256] ×3 | [1×1, 64]<br>[3×3, 64]<br>[1×1, 256] ×3 |
+| **conv3_x** | 28×28 | [3×3, 128]<br>[3×3, 128] ×2 | [3×3, 128]<br>[3×3, 128] ×4 | [1×1, 128]<br>[3×3, 128]<br>[1×1, 512] ×4 | [1×1, 128]<br>[3×3, 128]<br>[1×1, 512] ×4 | [1×1, 128]<br>[3×3, 128]<br>[1×1, 512] ×8 |
+| **conv4_x** | 14×14 | [3×3, 256]<br>[3×3, 256] ×2 | [3×3, 256]<br>[3×3, 256] ×6 | [1×1, 256]<br>[3×3, 256]<br>[1×1, 1024] ×6 | [1×1, 256]<br>[3×3, 256]<br>[1×1, 1024] ×23 | [1×1, 256]<br>[3×3, 256]<br>[1×1, 1024] ×36 |
+| **conv5_x** | 7×7 | [3×3, 512]<br>[3×3, 512] ×2 | [3×3, 512]<br>[3×3, 512] ×3 | [1×1, 512]<br>[3×3, 512]<br>[1×1, 2048] ×3 | [1×1, 512]<br>[3×3, 512]<br>[1×1, 2048] ×3 | [1×1, 512]<br>[3×3, 512]<br>[1×1, 2048] ×3 |
+| | 1×1 | Global avg pool, 1000-d FC, softmax | Global avg pool, 1000-d FC, softmax | Global avg pool, 1000-d FC, softmax | Global avg pool, 1000-d FC, softmax | Global avg pool, 1000-d FC, softmax |
+| **Total layers** | | 18 | 34 | 50 | 101 | 152 |
+| **FLOPs** | | 1.8×10⁹ | 3.6×10⁹ | 3.8×10⁹ | 7.6×10⁹ | 11.3×10⁹ |
+| **Parameters** | | ~11M | ~21M | ~25M | ~44M | ~60M |
+
+**Key Design Principles:**
+
+```
+1. Convolutional Layers:
+   - Mostly 3×3 filters (VGG-inspired)
+   - Batch Normalization after each conv, before activation
+   - No dropout (BN provides regularization)
+
+2. Downsampling Strategy:
+   - Stride-2 convolutions (not max pooling)
+   - Applied at conv3_1, conv4_1, conv5_1
+   - Halves spatial dimensions (H×W → H/2 × W/2)
+
+3. Filter Count Progression:
+   - Same output size → same # filters
+   - Halved output size → doubled # filters
+   - Maintains time complexity per layer
+   - Pattern: 64 → 128 → 256 → 512 (basic)
+   - Pattern: 64 → 128 → 256 → 512 → ... → 2048 (bottleneck)
+
+4. Global Average Pooling:
+   - Replaces fully-connected layers (except final classifier)
+   - Reduces parameters dramatically
+   - More robust to spatial translations
+
+5. No Dropout:
+   - Batch Normalization provides sufficient regularization
+   - Dropout not used in ResNet training
+```
+
+**Computational Complexity Comparison:**
+
+| Model | Layers | Params | FLOPs | Top-5 Error | Depth/Complexity Ratio |
+|-------|--------|--------|-------|-------------|------------------------|
+| AlexNet | 8 | 60M | 0.7B | 19.7% | Low/Low |
+| VGG-16 | 16 | 138M | 15.3B | 9.3% | Medium/High |
+| VGG-19 | 19 | 144M | 19.6B | 9.3% | Medium/Very High |
+| GoogLeNet | 22 | 6M | 1.5B | 9.15% | High/Low |
+| **ResNet-34** | **34** | **21M** | **3.6B** | **7.76%** | **High/Low** |
+| **ResNet-50** | **50** | **25M** | **3.8B** | **6.71%** | **Very High/Low** |
+| **ResNet-101** | **101** | **44M** | **7.6B** | **6.05%** | **Extremely High/Medium** |
+| **ResNet-152** | **152** | **60M** | **11.3B** | **5.71%** | **Extremely High/Medium** |
+
+**Key Observations:**
+
+```
+ResNet-152 vs. VGG-19:
+  - 8× deeper (152 vs. 19 layers)
+  - 58% fewer FLOPs (11.3B vs. 19.6B)
+  - 58% fewer parameters (60M vs. 144M)
+  - 38% better accuracy (5.71% vs. 9.3% top-5 error)
+  
+Efficiency insight:
+  Depth doesn't necessarily increase complexity
+  Smart architecture design (bottlenecks, shortcuts) is key
+```
+
+---
+
+### **Training Configuration**
+
+#### **ImageNet Training Details**
+
+**Dataset:**
+```yaml
+Dataset: ImageNet ILSVRC 2012
+Training images: 1.28 million
+Validation images: 50,000
+Test images: 100,000
+Classes: 1,000
+```
+
+**Data Augmentation:**
+```python
+# Training augmentation pipeline
+def train_augmentation(image):
+    """
+    Standard ImageNet augmentation for ResNet training
+    """
+    # 1. Scale augmentation
+    # Resize with shorter side randomly in [256, 480]
+    shorter_side = random.randint(256, 480)
+    image = resize_shorter_side(image, shorter_side)
+    
+    # 2. Random crop 224×224
+    image = random_crop(image, size=(224, 224))
+    
+    # 3. Random horizontal flip (50% probability)
+    if random.random() > 0.5:
+        image = horizontal_flip(image)
+    
+    # 4. Color augmentation (AlexNet-style)
+    # PCA color augmentation
+    image = color_augmentation(image)
+    
+    # 5. Per-pixel mean subtraction
+    image = subtract_mean(image)  # ImageNet mean
+    
+    return image
+
+# Testing augmentation
+def test_augmentation(image):
+    """
+    Standard 10-crop testing
+    """
+    # Resize shorter side to 256
+    image = resize_shorter_side(image, 256)
+    
+    # 10-crop: 4 corners + center, plus horizontal flips
+    crops = []
+    for flip in [False, True]:
+        img = horizontal_flip(image) if flip else image
+        # Top-left, top-right, bottom-left, bottom-right, center
+        crops.extend(extract_crops(img, size=(224, 224)))
+    
+    return crops  # 10 crops per image
+
+# Best results: Multi-scale testing
+def best_test_augmentation(image):
+    """
+    Fully-convolutional multi-scale testing
+    Used for final competition results
+    """
+    scales = [224, 256, 384, 480, 640]
+    predictions = []
+    
+    for scale in scales:
+        img = resize_shorter_side(image, scale)
+        # Fully-convolutional forward pass
+        # Average predictions across scales
+        pred = model(img)
+        predictions.append(pred)
+    
+    return average(predictions)
+```
+
+**Optimization Hyperparameters:**
+
+```yaml
+Optimizer: SGD (Stochastic Gradient Descent)
+  Momentum: 0.9
+  Weight decay: 0.0001
+  Nesterov: False (standard momentum)
+
+Batch size: 256
+  - Distributed across 8 GPUs (32 per GPU)
+  - Larger batches → more stable gradients
+
+Learning rate schedule:
+  Initial LR: 0.1
+  Decay: Divide by 10 when validation error plateaus
+  Total iterations: 600,000 (60×10⁴)
+  Epochs: ~90-100 (depends on early stopping)
+
+Learning rate milestones (typical):
+  - Start: 0.1 (iterations 0-300K)
+  - First decay: 0.01 (iterations 300K-450K)
+  - Second decay: 0.001 (iterations 450K-600K)
+
+Initialization: He initialization (Kaiming initialization)
+  - W ~ N(0, sqrt(2/n))
+  - where n = number of input connections
+  - Specifically designed for ReLU networks
+  - Critical for deep network training
+
+Batch Normalization:
+  - Applied after every convolution
+  - Applied BEFORE activation (conv → BN → ReLU)
+  - Momentum: 0.9 (for running mean/variance)
+  - Epsilon: 1e-5
+
+No dropout:
+  - BN provides sufficient regularization
+  - Dropout can interfere with BN
+  - Simpler training procedure
+```
+
+**Training Procedure:**
+
+```python
+def train_resnet(model, train_loader, val_loader):
+    """
+    Complete ResNet training procedure
+    """
+    # Setup
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=0.1,
+        momentum=0.9,
+        weight_decay=0.0001
+    )
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    # Learning rate schedule
+    lr_schedule = {
+        30: 0.01,   # Reduce to 0.01 at epoch 30
+        60: 0.001,  # Reduce to 0.001 at epoch 60
+        90: 0.0001  # Reduce to 0.0001 at epoch 90
+    }
+    
+    best_acc = 0.0
+    
+    # Training loop
+    for epoch in range(100):
+        # Adjust learning rate
+        if epoch in lr_schedule:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_schedule[epoch]
+            print(f"Epoch {epoch}: LR = {lr_schedule[epoch]}")
+        
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        
+        for images, labels in train_loader:
+            images = images.cuda()
+            labels = labels.cuda()
+            
+            # Forward pass
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # Statistics
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_correct += predicted.eq(labels).sum().item()
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images = images.cuda()
+                labels = labels.cuda()
+                
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                _, predicted = outputs.max(1)
+                val_correct += predicted.eq(labels).sum().item()
+        
+        # Compute accuracies
+        train_acc = 100. * train_correct / len(train_loader.dataset)
+        val_acc = 100. * val_correct / len(val_loader.dataset)
+        
+        print(f"Epoch {epoch}: Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%")
+        
+        # Save best model
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), 'resnet_best.pth')
+    
+    return model
+```
+
+---
+
+### **Performance Results**
+
+#### **ImageNet Classification**
+
+**Plain Networks vs. ResNets (Table 2 from paper):**
+
+| Model | Layers | Top-1 Error | Top-5 Error | Observation |
+|-------|--------|-------------|-------------|-------------|
+| Plain-18 | 18 | 27.94% | - | Baseline shallow plain |
+| Plain-34 | 34 | 28.54% | - | **WORSE than 18-layer!** (degradation) |
+| **ResNet-18** | **18** | **27.88%** | **-** | Comparable to Plain-18 |
+| **ResNet-34** | **34** | **25.03%** | **-** | **Better than ResNet-18** (no degradation!) |
+
+**Key Finding:**
+```
+Plain networks: Degradation problem
+  - Deeper (34) worse than shallow (18)
+  - 28.54% vs. 27.94% = +0.6% error
+  - Training error also higher for deeper
+
+ResNets: NO degradation
+  - Deeper (34) better than shallow (18)
+  - 25.03% vs. 27.88% = -2.85% error
+  - Successfully gains from depth
+  
+Impact of residual learning:
+  - ResNet-34 vs. Plain-34: 25.03% vs. 28.54%
+  - Absolute improvement: -3.51% error
+  - Enables training 8× deeper networks
+```
+
+**Single-Model Results on ImageNet Validation (Table 3):**
+
+| Model | Layers | Params | FLOPs | Top-1 Error | Top-5 Error |
+|-------|--------|--------|-------|-------------|-------------|
+| VGG-16 | 16 | 138M | 15.3B | 28.07% | 9.33% |
+| GoogLeNet | 22 | 6M | 1.5B | - | 9.15% |
+| PReLU-net | - | - | - | 24.27% | 7.38% |
+| Plain-34 | 34 | 21M | 3.6B | 28.54% | 10.02% |
+| **ResNet-34** | **34** | **21M** | **3.6B** | **25.03%** | **7.76%** |
+| **ResNet-50** | **50** | **25M** | **3.8B** | **22.85%** | **6.71%** |
+| **ResNet-101** | **101** | **44M** | **7.6B** | **21.75%** | **6.05%** |
+| **ResNet-152** | **152** | **60M** | **11.3B** | **21.43%** | **5.71%** |
+
+**Single-Model Test Results (Table 4):**
+
+| Model | Top-1 Error | Top-5 Error |
+|-------|-------------|-------------|
+| VGG | 24.4% | 7.1% |
+| GoogLeNet | - | 7.89% |
+| PReLU-net | 21.59% | 5.71% |
+| BN-Inception | 21.99% | 5.81% |
+| **ResNet-34** | **21.84%** | **5.71%** |
+| **ResNet-50** | **20.74%** | **5.25%** |
+| **ResNet-101** | **19.87%** | **4.60%** |
+| **ResNet-152** | **19.38%** | **4.49%** |
+
+**Ensemble Results on Test Set (Table 5):**
+
+| Model | Top-5 Error (Test) |
+|-------|-------------------|
+| VGG (ILSVRC'14) | 7.32% |
+| GoogLeNet (ILSVRC'14) | 6.66% |
+| VGG (v5) | 6.8% |
+| PReLU-net | 4.94% |
+| BN-Inception | 4.82% |
+| **ResNet (ILSVRC'15)** | **3.57%** 🏆 |
+
+**ILSVRC 2015 Competition Results:**
+
+```
+ResNet submissions won 1st place in:
+  ✅ ImageNet Classification: 3.57% top-5 error
+  ✅ ImageNet Detection
+  ✅ ImageNet Localization
+  ✅ COCO Detection
+  ✅ COCO Segmentation
+
+Ensemble composition:
+  - 6 models of different depths
+  - Including two ResNet-152 models
+  - Multi-scale testing (224, 256, 384, 480, 640)
+  - Fully-convolutional inference
+```
+
+#### **CIFAR-10 Results**
+
+**Dataset:**
+```yaml
+Training images: 50,000 (32×32 RGB)
+Test images: 10,000
+Classes: 10
+Architecture: Modified for small images
+  - Remove 7×7 conv and max pool
+  - Start with 3×3 conv directly on 32×32 images
+```
+
+**Plain Networks (Figure 6, left):**
+
+| Model | Layers | Training Error | Test Error |
+|-------|--------|----------------|------------|
+| Plain-20 | 20 | ~6% | ~8% |
+| Plain-32 | 32 | ~7% | ~9% |
+| Plain-44 | 44 | ~8% | ~10% |
+| Plain-56 | 56 | ~10% | ~12% |
+| Plain-110 | 110 | >60% | >60% (failed to converge!) |
+
+**Degradation Problem Confirmed:**
+```
+Deeper plain networks consistently worse
+110-layer completely failed (>60% error)
+Training error increases with depth
+```
+
+**ResNets (Table 6):**
+
+| Model | Layers | Params | Test Error | Rank |
+|-------|--------|--------|------------|------|
+| Maxout | - | - | 9.38% | - |
+| NIN | - | - | 8.81% | - |
+| DSN | - | - | 8.22% | - |
+| FitNet | 19 | 2.5M | 8.39% | - |
+| Highway | 19 | 2.3M | 7.54% | - |
+| Highway | 32 | 1.25M | 8.80% | (degraded!) |
+| **ResNet-20** | **20** | **0.27M** | **8.75%** | - |
+| **ResNet-32** | **32** | **0.46M** | **7.51%** | - |
+| **ResNet-44** | **44** | **0.66M** | **7.17%** | - |
+| **ResNet-56** | **56** | **0.85M** | **6.97%** | - |
+| **ResNet-110** | **110** | **1.7M** | **6.43%** | 🏆 **Best** |
+| ResNet-1202 | 1202 | 19.4M | 7.93% | (overfitting) |
+
+**Key Observations:**
+
+```
+1. No degradation with ResNets:
+   - Deeper networks consistently better
+   - 110-layer achieves best result (6.43%)
+   - Plain-110 failed, ResNet-110 succeeds
+
+2. Highway network comparison:
+   - Highway-19: 7.54%
+   - Highway-32: 8.80% (degraded with depth!)
+   - ResNet-32: 7.51% (improved with depth)
+   - Residual connections superior to gated shortcuts
+
+3. Extreme depth (1202 layers):
+   - ResNet-1202 trains successfully (<0.1% train error)
+   - But overfits (7.93% test error vs. 6.43% for 110-layer)
+   - Suggests need for regularization at extreme depths
+
+4. Parameter efficiency:
+   - ResNet-110: 1.7M params, 6.43% error
+   - FitNet-19: 2.5M params, 8.39% error
+   - Highway-19: 2.3M params, 7.54% error
+   - ResNets more parameter-efficient
+```
+
+#### **Analysis of Layer Responses (Figure 7)**
+
+**Experiment:**
+```
+Measure standard deviation of layer responses
+  - Responses = outputs of 3×3 layers
+  - After BN, before nonlinearity
+  - Indicates magnitude of learned transformations
+```
+
+**Results:**
+
+| Model | Average Response Std |
+|-------|---------------------|
+| Plain-20 | ~1.5-2.5 |
+| Plain-56 | ~1.0-3.0 (high variance) |
+| **ResNet-20** | **~0.5-1.5** |
+| **ResNet-56** | **~0.3-1.0** |
+| **ResNet-110** | **~0.2-0.8** |
+
+**Interpretation:**
+
+```
+1. ResNets have smaller responses than plain networks:
+   - Confirms residual functions closer to zero
+   - Supports hypothesis: easier to learn small perturbations
+
+2. Deeper ResNets → smaller responses:
+   - ResNet-20: avg std ~1.0
+   - ResNet-56: avg std ~0.6
+   - ResNet-110: avg std ~0.4
+   → Individual layers make smaller modifications in deeper networks
+
+3. Validates residual learning hypothesis:
+   - If optimal H(x) ≈ x + small ε
+   - ResNet learns small F(x) ≈ ε
+   - Plain network must learn entire H(x)
+   → ResNet's task is easier
+
+4. Layer specialization:
+   - Some layers have very small responses (~0.1 std)
+   - Close to identity mapping
+   - Network learns which layers need transformation
+```
+
+#### **Object Detection & Other Tasks**
+
+**PASCAL VOC 2007/2012 Detection (Table 7):**
+
+| Backbone | Training Data | VOC 07 Test mAP | VOC 12 Test mAP |
+|----------|---------------|-----------------|-----------------|
+| VGG-16 | 07+12 | 73.2% | 70.4% |
+| **ResNet-101** | **07+12** | **76.4%** | **73.8%** |
+| Improvement | | **+3.2%** | **+3.4%** |
+
+**MS COCO Detection (Table 8):**
+
+| Backbone | mAP@0.5 | mAP@[0.5, 0.95] |
+|----------|---------|-----------------|
+| VGG-16 | 41.5% | 21.2% |
+| **ResNet-101** | **48.4%** | **27.2%** |
+| Improvement | **+6.9%** | **+6.0%** |
+
+**Relative Improvement:**
+```
+COCO mAP@[0.5, 0.95]: 27.2% vs. 21.2%
+Relative gain: (27.2 - 21.2) / 21.2 = 28.3%
+
+Solely due to better representations!
+  - Same detection framework (Faster R-CNN)
+  - Only changed backbone (VGG → ResNet)
+  - Dramatic improvement from better features
+```
+
+**ILSVRC & COCO 2015 Competitions:**
+
+```
+ResNet won 1st place in all 5 tracks:
+
+ImageNet Classification:
+  - 3.57% top-5 error
+  - Beat all previous methods
+
+ImageNet Detection:
+  - Faster R-CNN with ResNet-101
+  - Best detection performance
+
+ImageNet Localization:
+  - Precise object location prediction
+  - ResNet features superior
+
+COCO Detection:
+  - Multi-scale object detection
+  - ResNet backbone critical
+
+COCO Segmentation:
+  - Instance-level segmentation
+  - ResNet features enable precise masks
+
+Universal finding:
+  "Deep residual representations have excellent 
+   generalization across all visual recognition tasks"
+```
+
+---
+
+### **Why ResNets Work: Deeper Analysis**
+
+#### **Optimization Perspective**
+
+**1. Gradient Flow:**
+
+```python
+# Backward pass through residual block
+
+# Plain network:
+grad_input = grad_output * dF/dx
+# Gradient must flow through all transformations
+
+# ResNet:
+grad_input = grad_output * (1 + dF/dx)
+#                           ↑
+#                    Identity term ensures gradient always flows!
+
+# Even if dF/dx ≈ 0 (layer does nothing):
+#   Plain: gradient vanishes (dF/dx → 0)
+#   ResNet: gradient preserved (1 + 0 = 1)
+
+# Benefit: Direct gradient path from output to input
+#   → No vanishing gradient problem
+#   → Enables training very deep networks
+```
+
+**Mathematical Derivation:**
+
+```
+Forward pass:
+  y = F(x) + x
+
+Backward pass (chain rule):
+  ∂L/∂x = ∂L/∂y × ∂y/∂x
+        = ∂L/∂y × (∂F/∂x + 1)
+        = ∂L/∂y × ∂F/∂x + ∂L/∂y
+
+Key insight:
+  Gradient has TWO components:
+    1. ∂L/∂y × ∂F/∂x  (gradient through F)
+    2. ∂L/∂y          (direct gradient path)
+
+  Component 2 ensures gradient ALWAYS flows
+  Even if component 1 vanishes (∂F/∂x ≈ 0)
+```
+
+**2. Implicit Ensemble:**
+
+```
+ResNet as ensemble of exponentially many paths:
+
+Consider 3-block ResNet:
+  Input → Block1 → Block2 → Block3 → Output
+
+Possible paths:
+  1. x → x → x → x (all identity, 0 transformations)
+  2. x → F1(x) → x → x (only Block1)
+  3. x → x → F2(F1(x)) → x (Blocks 1,2)
+  4. x → F1(x) → F2(F1(x)) → x (Blocks 1,2)
+  5-8. ... (combinations with Block3)
+  
+Total paths: 2³ = 8 paths
+
+For n blocks: 2ⁿ possible paths
+  ResNet-152 ≈ 50 residual blocks
+  Possible paths ≈ 2⁵⁰ ≈ 10¹⁵ paths!
+
+Interpretation:
+  ResNet implicitly ensembles exponentially many networks
+  Different paths activate for different inputs
+  Robustness from diversity of paths
+  
+Evidence:
+  Deleting individual layers has small impact
+  (Paper: "Deep Networks with Stochastic Depth")
+  Consistent with ensemble behavior
+```
+
+**3. Optimization Landscape:**
+
+```
+Loss landscape visualization (conceptual):
+
+Plain network landscape:
+    High loss peaks
+      /\      /\    /\
+     /  \    /  \  /  \
+    /    \  /    \/    \
+  Difficult to navigate
+  Many local minima
+  Optimization gets stuck
+
+ResNet landscape:
+    Smoother, more convex
+      __        __
+     /  \      /  \
+    /    \____/    \____
+  Easier to navigate
+  Fewer sharp minima
+  Optimization successful
+
+Hypothesis:
+  Residual connections smooth the loss landscape
+  Make optimization easier
+  Enable finding better solutions
+```
+
+#### **Representation Learning Perspective**
+
+**Progressive Feature Refinement:**
+
+```
+ResNet as iterative refinement:
+
+Layer 1: H₁(x) = x + F₁(x)
+         Initial representation + small refinement
+
+Layer 2: H₂(H₁(x)) = H₁(x) + F₂(H₁(x))
+         = x + F₁(x) + F₂(H₁(x))
+         Previous representation + another refinement
+
+Layer n: Hₙ(...) = x + Σᵢ Fᵢ(...)
+         Original input + accumulated refinements
+
+Interpretation:
+  - Start with input representation
+  - Each layer adds small correction
+  - Final representation = input + all corrections
+  - Like iterative algorithms (gradient descent, etc.)
+
+Benefit:
+  - Don't need to relearn entire representation each layer
+  - Just add incremental improvements
+  - More efficient learning
+```
+
+**Identity Initialization:**
+
+```
+Thought experiment:
+
+If optimal mapping is identity:
+  Optimal H(x) = x
+
+Plain network:
+  Must set many weights to approximate identity
+  W₁ · W₂ · ... · Wₙ ≈ I (identity matrix)
+  Very difficult with random initialization
+
+ResNet:
+  Just set F(x) = 0
+  Then H(x) = F(x) + x = 0 + x = x
+  Easy! Just initialize weights near zero
+
+This is why ResNet learns faster initially:
+  Good initialization point (near identity)
+  Plain network starts far from identity
+```
+
+---
+
+### **Comparison with Other Architectures**
+
+| Feature | VGG | GoogLeNet (Inception) | ResNet | Notes |
+|---------|-----|---------------------|---------|-------|
+| **Core Innovation** | Depth (16-19 layers) | Multi-scale (Inception modules) | **Residual connections** | **Game-changing** |
+| **Max Depth** | 19 | 22 | **152** (8× deeper!) | Enables ultra-deep networks |
+| **Parameters** | 138M (VGG-16) | 6M | 25M (ResNet-50), 60M (ResNet-152) | ResNet efficient |
+| **FLOPs** | 15.3B (VGG-16) | 1.5B | 3.8B (ResNet-50), 11.3B (ResNet-152) | More efficient than VGG |
+| **Optimization** | Moderate difficulty | Moderate | **Easy** (no degradation) | **Key advantage** |
+| **Training** | Days | Days | Days (similar) | No extra cost |
+| **Top-5 Error** | 7.3% | 6.66% | **3.57% ensemble** | **Best in 2015** |
+| **Shortcuts** | None | Inception merging | **Identity shortcuts** | **Core difference** |
+| **Activation** | ReLU | ReLU | ReLU | Standard |
+| **Normalization** | None | None | **Batch Norm** (all layers) | Critical component |
+| **Pooling** | Max pooling | Max pooling | Global avg pooling | More robust |
+
+**Key Differentiators:**
+
+```
+ResNet vs. VGG:
+  ✅ 8× deeper (152 vs. 19)
+  ✅ 58% fewer FLOPs (11.3B vs. 19.6B)
+  ✅ 58% fewer params (60M vs. 144M)
+  ✅ 38% better accuracy (5.71% vs. 9.3%)
+  → ResNet superior in every metric
+
+ResNet vs. GoogLeNet:
+  ✅ 7× deeper (152 vs. 22)
+  ✅ Simpler architecture (no complex inception modules)
+  ✅ Better accuracy (3.57% vs. 6.66%)
+  ⚖️ More FLOPs (11.3B vs. 1.5B) but worth it
+  → ResNet more accurate, GoogLeNet more efficient
+
+ResNet vs. Highway Networks:
+  ✅ Parameter-free shortcuts (vs. gated)
+  ✅ Always open (vs. learned gates)
+  ✅ Demonstrates >100 layer benefits
+  ✅ Better CIFAR-10 results
+  → Simpler, more effective
+
+ResNet's unique strength:
+  Solves degradation problem
+  Enables training arbitrarily deep networks
+  State-of-the-art across all vision tasks
+```
+
+---
+
+### **Impact & Legacy**
+
+#### **Immediate Impact (2015-2016)**
+
+**Competition Wins:**
+```
+ILSVRC 2015: Swept all 5 tracks
+  - Classification, Detection, Localization
+  - COCO Detection, COCO Segmentation
+  - Unprecedented dominance
+
+Academic Recognition:
+  - CVPR 2016 Best Paper Award
+  - 150,000+ citations (as of 2024)
+  - Most cited computer vision paper of 2016
+```
+
+**Paradigm Shift:**
+
+```
+Before ResNet:
+  "Deeper networks are hard to train"
+  "There's a practical limit to depth"
+  "VGG-19 is probably deep enough"
+
+After ResNet:
+  "Depth is critical for performance"
+  "We can train 100+ layer networks"
+  "Residual connections are essential"
+
+Community response:
+  - Immediate widespread adoption
+  - Became default architecture for transfer learning
+  - Influenced all subsequent architectures
+```
+
+#### **Long-Term Influence**
+
+**1. Architecture Design Principles:**
+
+```
+Residual connections became standard:
+  - DenseNet: Dense connections (every layer to every other)
+  - ResNeXt: Residual + grouped convolutions
+  - Wide ResNet: Wider residual blocks
+  - ResNet-v2: Improved skip connections
+  - EfficientNet: Residual connections + compound scaling
+  - Vision Transformers: Residual connections in attention
+
+Universal adoption:
+  - Nearly every modern architecture uses skip connections
+  - Considered essential for deep networks
+  - Not just convnets—transformers, RNNs, etc.
+```
+
+**2. Transfer Learning Standard:**
+
+```
+ResNet as backbone:
+  Object Detection:
+    - Faster R-CNN: ResNet backbone standard
+    - Mask R-CNN: ResNet-50/101 backbone
+    - RetinaNet, FCOS, DETR: All use ResNet
+  
+  Semantic Segmentation:
+    - FCN, U-Net variants: ResNet encoder
+    - DeepLab v3: ResNet-101 backbone
+    - PSPNet: ResNet-50/101
+  
+  Pose Estimation:
+    - OpenPose: ResNet features
+    - HRNet: Residual connections
+  
+  Medical Imaging:
+    - Pathology: ResNet-50 most common pretrain
+    - Radiology: ResNet backbones dominant
+
+ImageNet-pretrained ResNet-50:
+  - De facto standard for transfer learning
+  - Available in all major frameworks
+  - Billions of downloads
+```
+
+**3. Theoretical Understanding:**
+
+```
+Inspired research on:
+  - Loss landscape smoothness
+  - Gradient flow in deep networks
+  - Implicit ensemble interpretation
+  - Neural architecture search
+  - Optimization in deep learning
+
+Key papers building on ResNet:
+  - "Identity Mappings in Deep Residual Networks" (ResNet-v2)
+  - "Deep Networks with Stochastic Depth"
+  - "Residual Networks Behave Like Ensembles"
+  - "Visualizing the Loss Landscape of Neural Nets"
+```
+
+**4. Beyond Computer Vision:**
+
+```
+Residual connections in other domains:
+
+Natural Language Processing:
+  - Transformer: Residual connections in every layer
+  - BERT, GPT: Built on residual transformers
+  - Nearly all modern LLMs use residuals
+
+Speech Recognition:
+  - Deep Speech 2: Residual connections
+  - Wav2Vec 2.0: Residual convolutions
+
+Reinforcement Learning:
+  - AlphaGo: Residual networks in policy/value networks
+  - MuZero: Residual networks throughout
+
+Scientific Computing:
+  - Physics-informed neural networks: Residual connections
+  - Climate modeling: ResNet-based architectures
+
+Universal principle:
+  "If you're building a deep network, use residual connections"
+```
+
+---
+
+### **Practical Implementation**
+
+#### **PyTorch Implementation**
+
+```python
+import torch
+import torch.nn as nn
+
+class BasicBlock(nn.Module):
+    """Basic residual block (for ResNet-18/34)"""
+    expansion = 1
+    
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        
+        # Main path
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 
+                               kernel_size=3, stride=stride, 
+                               padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, stride=1,
+                               padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        # Shortcut path
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels * self.expansion:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * self.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels * self.expansion)
+            )
+    
+    def forward(self, x):
+        out = torch.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = torch.relu(out)
+        return out
+
+class Bottleneck(nn.Module):
+    """Bottleneck block (for ResNet-50/101/152)"""
+    expansion = 4
+    
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        
+        # Main path
+        self.conv1 = nn.Conv2d(in_channels, out_channels,
+                               kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels,
+                               kernel_size=3, stride=stride,
+                               padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion,
+                               kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)
+        
+        # Shortcut path
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels * self.expansion:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * self.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels * self.expansion)
+            )
+    
+    def forward(self, x):
+        out = torch.relu(self.bn1(self.conv1(x)))
+        out = torch.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += self.shortcut(x)
+        out = torch.relu(out)
+        return out
+
+class ResNet(nn.Module):
+    def __init__(self, block, layers, num_classes=1000):
+        super().__init__()
+        self.in_channels = 64
+        
+        # Initial conv layer
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, 
+                               padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        # Residual layers
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        
+        # Classification head
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        
+        # Weight initialization
+        self._init_weights()
+    
+    def _make_layer(self, block, out_channels, num_blocks, stride):
+        layers = []
+        # First block may downsample
+        layers.append(block(self.in_channels, out_channels, stride))
+        self.in_channels = out_channels * block.expansion
+        # Remaining blocks
+        for _ in range(1, num_blocks):
+            layers.append(block(self.in_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', 
+                                        nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        x = torch.relu(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+        
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        
+        return x
+
+# Factory functions
+def ResNet18(num_classes=1000):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes)
+
+def ResNet34(num_classes=1000):
+    return ResNet(BasicBlock, [3, 4, 6, 3], num_classes)
+
+def ResNet50(num_classes=1000):
+    return ResNet(Bottleneck, [3, 4, 6, 3], num_classes)
+
+def ResNet101(num_classes=1000):
+    return ResNet(Bottleneck, [3, 4, 23, 3], num_classes)
+
+def ResNet152(num_classes=1000):
+    return ResNet(Bottleneck, [3, 8, 36, 3], num_classes)
+
+# Example usage
+model = ResNet50(num_classes=1000)
+input_tensor = torch.randn(1, 3, 224, 224)
+output = model(input_tensor)
+print(f"Output shape: {output.shape}")  # (1, 1000)
+```
+
+#### **Loading Pretrained Models**
+
+```python
+import torchvision.models as models
+
+# Load pretrained ResNet-50
+model = models.resnet50(pretrained=True)
+model.eval()
+
+# For transfer learning
+num_classes = 10  # Your dataset classes
+model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+# For feature extraction (freeze backbone)
+for param in model.parameters():
+    param.requires_grad = False
+# Only train final layer
+model.fc = nn.Linear(model.fc.in_features, num_classes)
+for param in model.fc.parameters():
+    param.requires_grad = True
+```
+
+---
+
+### **Summary of Key Contributions**
+
+**1. Solved the Degradation Problem**
+- Identified that deeper plain networks perform worse
+- Not due to overfitting but optimization difficulty
+- Residual learning enables training 152-layer networks
+
+**2. Introduced Residual Learning Framework**
+- Learn F(x) = H(x) - x instead of H(x)
+- Identity shortcut connections (parameter-free)
+- Element-wise addition of skip and main paths
+
+**3. Achieved State-of-the-Art Results**
+- ImageNet: 3.57% top-5 error (2015 winner)
+- CIFAR-10: 6.43% error (110 layers)
+- Won all 5 tracks in ILSVRC & COCO 2015
+
+**4. Demonstrated Scalability**
+- Successfully trained 152-layer network on ImageNet
+- Trained 110-layer on CIFAR-10
+- Even trained 1202-layer (though overfitting occurred)
+
+**5. Universal Impact**
+- Residual connections now standard in all architectures
+- Default backbone for transfer learning
+- Influenced transformers, NLP, RL, and more
+
+**6. Practical Efficiency**
+- ResNet-152: 11.3B FLOPs vs. VGG-19: 19.6B FLOPs
+- 8× deeper yet more efficient
+- Bottleneck design reduces parameters dramatically
+
+---
+
+### **Citation**
+
+**When citing ResNet in papers:**
+
+```bibtex
+@inproceedings{he2016deep,
+  title={Deep residual learning for image recognition},
+  author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+  booktitle={Proceedings of the IEEE conference on computer vision and pattern recognition},
+  pages={770--778},
+  year={2016}
+}
+```
+
+**When mentioning in text:**
+- "We used ResNet-50 (He et al., 2016) pretrained on ImageNet as our backbone"
+- "Following He et al. (2016), we implemented residual connections between every two convolutional layers"
+- "ResNet-152 (He et al., 2016) achieved 3.57% top-5 error on ImageNet, winning ILSVRC 2015"
+
+---
+
+**Use Version 1** for Methods section in papers  
+**Use Version 2** as supplementary material, technical documentation, or teaching
+
+---
+
+## Model Availability
+
+- **Paper**: [OpenAccess CVPR 2016](https://openaccess.thecvf.com/content_cvpr_2016/papers/He_Deep_Residual_Learning_CVPR_2016_paper.pdf)
+- **Code**: Available in all major frameworks (PyTorch, TensorFlow, Keras, etc.)
+- **Pretrained Weights**: torchvision.models, TensorFlow Hub, Hugging Face
+- **Authors**: Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun (Microsoft Research)
